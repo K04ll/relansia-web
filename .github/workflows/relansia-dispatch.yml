@@ -1,0 +1,21 @@
+name: Relansia Dispatch
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call /api/reminders/dispatch (Vercel Cron header)
+        env:
+          CRON_URL: ${{ secrets.CRON_URL }}
+        run: |
+          curl -i -X POST "$CRON_URL" \
+            -H "x-vercel-cron: 1" \
+            -H "Content-Type: application/json" \
+            --data '{"source":"github-actions"}'
+
+
