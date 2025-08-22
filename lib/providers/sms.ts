@@ -1,6 +1,6 @@
 // lib/providers/sms.ts
 import "server-only";
-import type { SendPayload, ProviderResult } from "./types";
+import type { SendPayload, ProviderResult } from "../types";
 
 export async function sendSms(payload: SendPayload): Promise<ProviderResult> {
   const sid = process.env.TWILIO_ACCOUNT_SID;

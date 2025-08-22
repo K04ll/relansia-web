@@ -1,6 +1,6 @@
 // lib/providers/channels.ts
 import "server-only";
-import type { Channel, SendPayload, ProviderResult } from "./types";
+import type { Channel, SendPayload, ProviderResult } from "../types";
 
 export async function sendViaProvider(
   channel: Channel,
