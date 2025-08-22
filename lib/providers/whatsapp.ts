@@ -1,38 +1,25 @@
 // lib/providers/whatsapp.ts
-import type { ProviderSendResult } from "./email";
-import twilio from "twilio";
+import "server-only";
+import type { SendPayload, ProviderResult } from "./types";
 
-export type WhatsAppSendInput = {
-  to: string;             // ex: +336...
-  body: string;
-  fromWhatsApp?: string;  // override possible (ex: whatsapp:+14155238886)
-};
-
-function nowISO() { return new Date().toISOString(); }
-function wa(n: string) { return n.startsWith("whatsapp:") ? n : `whatsapp:${n}`; }
-
-export async function sendWhatsApp(input: WhatsAppSendInput): Promise<ProviderSendResult> {
+export async function sendWhatsApp(payload: SendPayload): Promise<ProviderResult> {
   const sid = process.env.TWILIO_ACCOUNT_SID;
   const token = process.env.TWILIO_AUTH_TOKEN;
-  const envFrom = process.env.TWILIO_WHATSAPP_FROM;
+  const from = process.env.TWILIO_WHATSAPP_FROM; // ex: "whatsapp:+14155238886"
 
-  const from = input.fromWhatsApp ?? envFrom;
+  if (!sid || !token) return { ok: false, error: "twilio_not_configured" };
+  if (!from) return { ok: false, error: "missing_whatsapp_from" };
+  const phone = payload.client?.phone;
+  if (!phone) return { ok: false, error: "missing_phone" };
 
-  if (!sid || !token || !from) {
-    // Mock dev
-    await new Promise((r) => setTimeout(r, 120));
-    return { ok: true, providerId: `mock_whatsapp_${Math.random().toString(36).slice(2)}`, at: nowISO() };
-  }
+  const to = phone.startsWith("whatsapp:") ? phone : `whatsapp:${phone}`;
 
   try {
-    const client = twilio(sid, token);
-    const msg = await client.messages.create({
-      from: wa(from),
-      to: wa(input.to),
-      body: input.body,
-    });
-    return { ok: true, providerId: msg.sid, at: (msg.dateCreated ?? new Date()).toISOString?.() ?? nowISO() };
+    const twilioMod = await import("twilio");
+    const client = twilioMod.default(sid, token);
+    const msg = await client.messages.create({ from, to, body: payload.message });
+    return { ok: true, providerId: msg.sid, at: new Date().toISOString() };
   } catch (e: any) {
-    return { ok: false, error: e?.message ?? String(e) };
+    return { ok: false, error: "twilio_failed", detail: String(e?.message || e) };
   }
 }

@@ -1,58 +1,23 @@
 // lib/providers/sms.ts
-import type { ProviderSendResult } from "./email";
-import twilio from "twilio";
+import "server-only";
+import type { SendPayload, ProviderResult } from "./types";
 
-export type SmsSendInput = {
-  to: string;
-  body: string;
-  fromNumber?: string;           // override possible
-  messagingServiceSid?: string;  // override possible (Alpha Sender via MSID)
-};
-
-function nowISO() { return new Date().toISOString(); }
-
-export async function sendSMS(input: SmsSendInput): Promise<ProviderSendResult> {
+export async function sendSms(payload: SendPayload): Promise<ProviderResult> {
   const sid = process.env.TWILIO_ACCOUNT_SID;
   const token = process.env.TWILIO_AUTH_TOKEN;
+  const from = process.env.TWILIO_SMS_FROM;
 
-  const envFrom = process.env.TWILIO_SMS_FROM;
-  const envMSID = process.env.TWILIO_MESSAGING_SERVICE_SID;
-
-  const from = input.fromNumber ?? envFrom;
-  const messagingServiceSid = input.messagingServiceSid ?? envMSID;
-
-  if (!sid || !token || (!from && !messagingServiceSid)) {
-    // Mock dev si pas config
-    await new Promise((r) => setTimeout(r, 120));
-    return { ok: true, providerId: `mock_sms_${Math.random().toString(36).slice(2)}`, at: nowISO() };
-  }
+  if (!sid || !token) return { ok: false, error: "twilio_not_configured" };
+  if (!from) return { ok: false, error: "missing_sms_from" };
+  const to = payload.client?.phone;
+  if (!to) return { ok: false, error: "missing_phone" };
 
   try {
-    const client = twilio(sid, token);
-
-    // priorité au Messaging Service (Alpha RELANSIA)
-    if (messagingServiceSid) {
-      try {
-        const msg = await client.messages.create({
-          to: input.to,
-          body: input.body,
-          messagingServiceSid,
-        });
-        return { ok: true, providerId: msg.sid, at: (msg.dateCreated ?? new Date()).toISOString?.() ?? nowISO() };
-      } catch (err) {
-        if (!from) throw err;
-        // sinon on tente le fallback numéro
-      }
-    }
-
-    // Fallback numéro
-    const msg = await client.messages.create({
-      to: input.to,
-      body: input.body,
-      from: from!, // on sait qu'il existe ici
-    });
-    return { ok: true, providerId: msg.sid, at: (msg.dateCreated ?? new Date()).toISOString?.() ?? nowISO() };
+    const twilioMod = await import("twilio");
+    const client = twilioMod.default(sid, token);
+    const msg = await client.messages.create({ from, to, body: payload.message });
+    return { ok: true, providerId: msg.sid, at: new Date().toISOString() };
   } catch (e: any) {
-    return { ok: false, error: e?.message ?? String(e) };
+    return { ok: false, error: "twilio_failed", detail: String(e?.message || e) };
   }
 }
