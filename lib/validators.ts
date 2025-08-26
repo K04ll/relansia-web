@@ -1,33 +1,53 @@
 // lib/validators.ts
 import { z } from "zod";
-import { parsePhoneNumberFromString, type CountryCode } from "libphonenumber-js";
 
-export const emailSchema = z.string().email();
-export const delaySchema = z.number().int().min(0).max(365);
+/**
+ * Mapping CSV (Step 1)
+ */
+export const csvMappingSchema = z.object({
+  email: z.string().optional(),
+  phone: z.string().optional(),
+  first_name: z.string().optional(),
+  last_name: z.string().optional(),
+});
 
-export function isValidEmail(email?: string) {
-  if (!email) return false;
-  const res = emailSchema.safeParse(email);
-  return res.success;
-}
+/**
+ * Fenêtre d'envoi (horaires + jours)
+ * - start/end au format "HH:MM" (24h)
+ * - days = tableau de nombres (0..6) => 0=Dimanche, 1=Lundi, ...
+ */
+export const sendWindowSchema = z.object({
+  start: z.string().regex(/^\d{2}:\d{2}$/, "Format HH:MM"),
+  end: z.string().regex(/^\d{2}:\d{2}$/, "Format HH:MM"),
+  days: z.array(z.number().int().min(0).max(6)).nonempty(),
+});
 
-export function normalizeE164(phone?: string, defaultCountry: CountryCode = "FR") {
-  if (!phone) return null;
-  // utiliser l'overload avec options pour être béton côté types
-  const p = parsePhoneNumberFromString(phone, { defaultCountry });
-  return p?.isValid() ? p.number : null;
-}
+/**
+ * Settings (Step 2)
+ */
+export const settingsSchema = z.object({
+  store_name: z.string().min(1, "Nom boutique requis"),
+  sender_name: z.string().min(1, "Nom expéditeur requis"),
+  timezone: z.string().min(1, "Timezone requise"),
+  send_window: sendWindowSchema,
+  signature: z.string().default(""),
+});
 
-export function addDaysISO(baseISO: string | Date, days: number) {
-  const base = typeof baseISO === "string" ? new Date(baseISO) : baseISO;
-  const d = new Date(base);
-  d.setHours(12, 0, 0, 0); // éviter DST
-  d.setDate(d.getDate() + days);
-  return d.toISOString();
-}
+/**
+ * Rules (Step 3)
+ * - delay_days: J+1, J+2, J+7 etc.
+ * - channel: "email" | "sms" | "whatsapp"
+ * - template: contenu du message (avec tokens)
+ * - position: ordre d’exécution (0,1,2,...)
+ * - enabled: active/inactive
+ */
+export const ruleSchema = z.object({
+  id: z.string().uuid().optional(), // peut être créé côté serveur
+  delay_days: z.number().int().min(0).max(365),
+  channel: z.enum(["email", "sms", "whatsapp"]),
+  template: z.string().min(1, "Template requis"),
+  position: z.number().int().min(0),
+  enabled: z.boolean().default(true),
+});
 
-export function todayISO() {
-  const d = new Date();
-  d.setHours(12, 0, 0, 0);
-  return d.toISOString();
-}
+export const rulesArraySchema = z.array(ruleSchema);

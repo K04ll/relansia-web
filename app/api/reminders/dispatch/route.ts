@@ -1,204 +1,137 @@
 // app/api/reminders/dispatch/route.ts
 import { NextResponse } from "next/server";
-import { supabaseServer } from "@/lib/supabase-server";
-import { sendViaProvider } from "@/lib/providers/channels";
-import { nowISO, errorJSON, toErrorInfo, ERROR } from "@/lib/logging";
+import { createClient } from "@supabase/supabase-js";
+import { sendEmail } from "@/lib/providers/email";
+import { sendSms } from "@/lib/providers/sms";
+import { sendWhatsapp } from "@/lib/providers/whatsapp";
+import { errorJSON, nowISO } from "@/lib/logging";
 
-/** Erreurs définitives → pas de retry */
-const NON_RETRYABLE = new Set<string>([
-  "invalid_email",
-  "missing_email",
-  "missing_phone",
-  "empty_message",
-  "unknown_channel",
-]);
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_KEY!
+);
 
-const RETRY_MAX = 3;
-const RETRY_BACKOFF_MIN = [5, 15, 60]; // minutes 1er/2e/3e retry
-
-const plusMinutesISO = (min: number) => {
-  const d = new Date();
-  d.setMinutes(d.getMinutes() + min);
-  return d.toISOString();
-};
-
-function assertCronAuth(req: Request) {
-  const secret = process.env.CRON_SECRET;
-  const auth = req.headers.get("authorization") || "";
-  const vercelCron = req.headers.get("x-vercel-cron") || "";
-
-  // ✅ Si la requête vient du scheduler Vercel
-  if (vercelCron === "1") return;
-
-  // ✅ Si la requête est locale / manuelle avec secret
-  if (secret && auth === `Bearer ${secret}`) return;
-
-  throw new Error("CRON_UNAUTHORIZED");
-}
-
-
-
-/** Charge TOUS les reminders éligibles (multi-users) */
-async function loadEligibleReminders() {
-  const supabase = supabaseServer;
-  const now = nowISO();
-  const { data, error } = await supabase
-    .from("reminders")
-    .select(`
-      id, user_id, client_id, channel, message, status, scheduled_at,
-      retry_count, next_attempt_at, last_attempt_at, last_error_code, last_error,
-      clients:clients(email, phone)
-    `)
-    .eq("status", "scheduled")
-    .or(`scheduled_at.lte.${now},next_attempt_at.lte.${now}`)
-    .limit(500);
-  if (error) throw error;
-  return data ?? [];
-}
-
-/** Log en DB (success/failed) */
-async function logDispatch(args: {
-  userId: string | null;
-  reminderId: string;
-  channel: "email" | "sms" | "whatsapp";
-  ok: boolean;
-  providerId?: string | null;
-  code?: string | null;
-  message?: string | null;
-}) {
-  const supabase = supabaseServer;
-  await supabase.from("dispatch_logs").insert({
-    user_id: args.userId,
-    reminder_id: args.reminderId,
-    channel: args.channel,
-    status: args.ok ? "success" : "failed",
-    provider_id: args.ok ? (args.providerId ?? null) : null,
-    error_detail: args.ok ? null : errorJSON(args.code ?? null, args.message ?? "Unknown error"),
-    created_at: nowISO(),
-  } as any);
-}
+// Backoff en minutes : 5, 15, 60, 180
+const BACKOFF = [5, 15, 60, 180];
 
 export async function POST(req: Request) {
+  // Auth Cron
+  const authHeader = req.headers.get("authorization");
+  const cronHeader = req.headers.get("x-vercel-cron");
+  if (!cronHeader && authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+    return NextResponse.json(errorJSON("unauthorized", "Unauthorized"), { status: 401 });
+  }
+
   try {
-    // 🔐 Protégé par CRON_SECRET
-    assertCronAuth(req);
+    // 1. Sélection reminders éligibles (status scheduled, now >= next_attempt_at)
+    const { data: reminders, error } = await supabase.rpc("pick_reminders_for_dispatch");
+    if (error) throw error;
 
-    const supabase = supabaseServer;
-    const rows = await loadEligibleReminders();
+    let processed = 0, sent = 0, failed = 0, retried = 0;
 
-    if (rows.length === 0) {
-      return NextResponse.json({ processed: 0, sent: 0, failed: 0, retried: 0 });
-    }
+    for (const r of reminders) {
+      processed++;
 
-    let sent = 0, failed = 0, retried = 0;
+      // Vérifier fenêtre horaire (user settings)
+      const inWindow = await isWithinSendWindow(r.user_id);
+      if (!inWindow) {
+        continue; // skip, sera repris au prochain tick
+      }
 
-    for (const r of rows as any[]) {
-      try {
-        // Validation message
-        if (!r.message || !String(r.message).trim()) {
-          const err = ERROR.EMPTY_MESSAGE;
-          await logDispatch({ userId: r.user_id, reminderId: r.id, channel: r.channel, ok: false, code: err.code, message: err.message });
-          await supabase.from("reminders").update({
-            status: "failed",
-            last_attempt_at: nowISO(),
-            last_error_code: err.code,
-            last_error: errorJSON(err.code, err.message),
-            next_attempt_at: null,
-          }).eq("id", r.id);
-          failed++;
-          continue;
-        }
+      // Marquer en "sending"
+      await supabase.from("reminders").update({
+        status: "sending",
+        last_attempt_at: nowISO()
+      }).eq("id", r.id);
 
-        // Envoi via agrégateur (email/sms/whatsapp)
-        const res = await sendViaProvider(
-          r.channel,
-          {
-            id: r.id,
-            channel: r.channel,
-            message: r.message,
-            client: r.clients ?? { email: null, phone: null },
-            meta: undefined, // storeName/ctaUrl si besoin
-          },
-          {}
-        );
+      let result;
+      if (r.channel === "email") {
+  result = await sendEmail({
+    id: r.id,
+    channel: "email",
+    message: r.message,
+    client: { email: r.client_email }, // <- on retire phone ici
+  });
+}
 
-        if (res.ok) {
-          await logDispatch({
-            userId: r.user_id, reminderId: r.id, channel: r.channel, ok: true, providerId: (res as any).providerId ?? null,
-          });
-          await supabase.from("reminders").update({
-            status: "sent",
-            sent_at: (res as any).at ?? nowISO(),
-            last_attempt_at: nowISO(),
-            last_error_code: null,
-            last_error: null,
-            next_attempt_at: null,
-          }).eq("id", r.id);
-          sent++;
-        } else {
-          const code = res.error ?? null;
-          const msg  = res.error ?? "provider_error";
+      if (r.channel === "sms") result = await sendSms({ id: r.id, channel: "sms", message: r.message, client: { email: r.client_email, phone: r.client_phone } });
+      if (r.channel === "whatsapp") result = await sendWhatsapp({ id: r.id, channel: "whatsapp", message: r.message, client: { email: r.client_email, phone: r.client_phone } });
 
-          await logDispatch({ userId: r.user_id, reminderId: r.id, channel: r.channel, ok: false, code, message: msg });
+      if (result?.ok) {
+        sent++;
+        await supabase.from("reminders").update({
+          status: "sent",
+          sent_at: nowISO(),
+          last_error_code: null,
+          last_error: null
+        }).eq("id", r.id);
 
-          // No-retry => FAILED direct
-          if (code && NON_RETRYABLE.has(code)) {
-            await supabase.from("reminders").update({
-              status: "failed",
-              last_attempt_at: nowISO(),
-              last_error_code: code,
-              last_error: errorJSON(code, msg),
-              next_attempt_at: null,
-            }).eq("id", r.id);
-            failed++;
-            continue;
-          }
-
-          // Retry/backoff
-          const currentRetry = r.retry_count ?? 0;
-          const willRetry = currentRetry < RETRY_MAX;
-          if (willRetry) {
-            const backoff = RETRY_BACKOFF_MIN[currentRetry] ?? 60;
-            await supabase.from("reminders").update({
-              retry_count: currentRetry + 1,
-              last_attempt_at: nowISO(),
-              last_error_code: code,
-              last_error: errorJSON(code, msg),
-              next_attempt_at: plusMinutesISO(backoff),
-            }).eq("id", r.id);
-            retried++;
-          } else {
-            await supabase.from("reminders").update({
-              status: "failed",
-              last_attempt_at: nowISO(),
-              last_error_code: code,
-              last_error: errorJSON(code, msg),
-              next_attempt_at: null,
-            }).eq("id", r.id);
-            failed++;
-          }
-        }
-      } catch (e: any) {
-        const ei = toErrorInfo(e);
-        await logDispatch({ userId: (r as any).user_id, reminderId: (r as any).id, channel: (r as any).channel, ok: false, code: ei.code, message: ei.message });
-        await supabaseServer.from("reminders").update({
-          status: "failed",
-          last_attempt_at: nowISO(),
-          last_error_code: ei.code,
-          last_error: errorJSON(ei.code, ei.message),
-          next_attempt_at: null,
-        }).eq("id", (r as any).id);
+        await supabase.from("dispatch_logs").insert({
+          user_id: r.user_id,
+          reminder_id: r.id,
+          channel: r.channel,
+          status: "success",
+          provider_id: result.providerId ?? null,
+          error_detail: null
+        });
+      } else {
         failed++;
+
+        // Backoff progressif
+        const retry = (r.retry_count ?? 0) + 1;
+        const delayMin = BACKOFF[Math.min(retry - 1, BACKOFF.length - 1)];
+        const nextAttempt = new Date(Date.now() + delayMin * 60000).toISOString();
+
+        await supabase.from("reminders").update({
+          status: retry >= BACKOFF.length ? "failed" : "scheduled",
+          retry_count: retry,
+          next_attempt_at: retry >= BACKOFF.length ? null : nextAttempt,
+          last_error_code: result?.error ?? "unknown_error",
+          last_error: result?.detail ?? null
+        }).eq("id", r.id);
+
+        await supabase.from("dispatch_logs").insert({
+          user_id: r.user_id,
+          reminder_id: r.id,
+          channel: r.channel,
+          status: "failed",
+          provider_id: null,
+          error_detail: { code: result?.error ?? "unknown_error", message: result?.detail ?? "Unspecified error" }
+        });
+
+        if (retry < BACKOFF.length) retried++;
       }
     }
 
-    return NextResponse.json({ processed: rows.length, sent, failed, retried });
+    return NextResponse.json({ processed, sent, failed, retried });
   } catch (e: any) {
-    const ei = toErrorInfo(e);
-    return NextResponse.json({ error: "fatal", detail: ei.message }, { status: 500 });
+    console.error("Dispatch worker error:", e);
+    return NextResponse.json(errorJSON("dispatch_failed", e?.message || "Unknown error"), { status: 500 });
   }
 }
 
-export async function GET(req: Request) {
-  return POST(req);
+/**
+ * Vérifie si l'heure actuelle (UTC) correspond à la fenêtre d'envoi
+ * paramétrée par l’utilisateur.
+ */
+async function isWithinSendWindow(user_id: string): Promise<boolean> {
+  const { data: settings } = await supabase.from("settings").select("*").eq("user_id", user_id).maybeSingle();
+  if (!settings) return true; // pas de restriction
+
+  try {
+    const now = new Date();
+    const tzNow = new Date(now.toLocaleString("en-US", { timeZone: settings.timezone || "UTC" }));
+    const currentDay = tzNow.getDay(); // 0=dimanche
+    const currentTime = tzNow.toTimeString().slice(0, 5);
+
+    if (!settings.send_window) return true;
+    const { start, end, days } = settings.send_window;
+
+    if (!days.includes(currentDay)) return false;
+    if (currentTime < start || currentTime > end) return false;
+
+    return true;
+  } catch {
+    return true;
+  }
 }

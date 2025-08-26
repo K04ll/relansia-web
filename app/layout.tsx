@@ -1,3 +1,10 @@
+import { Inter } from "next/font/google";
+
+const inter = Inter({
+  subsets: ["latin"],
+  variable: "--font-sans",
+});
+
 import "./globals.css";
 import Link from "next/link";
 
@@ -5,7 +12,7 @@ export const metadata = { title: "Relansia — Relances intelligentes" };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="fr">
+    <html lang="fr" className={`${inter.variable}`}>
       <body className="min-h-screen bg-white text-[#2F2F2F]">
         <header className="border-b border-black/10 bg-white sticky top-0 z-40">
           <nav className="mx-auto max-w-6xl px-4 py-3 flex items-center justify-between">

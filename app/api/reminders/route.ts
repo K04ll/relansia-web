@@ -1,194 +1,91 @@
+// app/api/reminders/route.ts
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabase-server";
-import { estimateDepletionDate } from "@/lib/scheduling";
-import { getUserIdOrDev } from "@/lib/auth";
 
-/** GET /api/reminders */
-export async function GET() {
-  try {
-    const userId = getUserIdOrDev();
-    const { data, error } = await supabaseServer
-      .from("reminders")
-      .select(
-        "id, product, delay_days, channel, scheduled_at, message, status, created_at, sent_at, clients:client_id(email,first_name,last_name,phone)"
-      )
-      .eq("user_id", userId)
-      .order("created_at", { ascending: false });
+type Status = "draft" | "scheduled" | "sending" | "sent" | "failed" | "canceled";
+type Channel = "email" | "sms" | "whatsapp";
 
-    if (error) throw error;
-    return NextResponse.json(data ?? []);
-  } catch (e: any) {
-    return NextResponse.json({ error: e?.message ?? "reminders get error" }, { status: 500 });
-  }
+function err(code: string, message: string, status = 400) {
+  return NextResponse.json({ error: { code, message } }, { status });
 }
 
-/** POST /api/reminders */
-export async function POST(req: Request) {
-  try {
-    const userId = getUserIdOrDev();
-    const body = await req.json();
+async function getUserIdOrDev() {
+  return process.env.DEV_USER_ID || "11111111-1111-1111-1111-111111111111";
+}
 
-    const {
-      client_email,
-      client_id,
-      product,
-      delay_days = 0,
-      channel,
-      scheduled_at,
-      message,
-      status = "scheduled",
-    } = body ?? {};
+export async function GET(req: Request) {
+  const userId = await getUserIdOrDev();
+  const { searchParams } = new URL(req.url);
 
-    if (!channel) {
-      return NextResponse.json({ ok: false, error: "channel is required" }, { status: 400 });
+  const page = Math.max(parseInt(searchParams.get("page") || "1", 10), 1);
+  const pageSize = Math.min(Math.max(parseInt(searchParams.get("pageSize") || "50", 10), 1), 200);
+
+  const statusParams = searchParams.getAll("status[]") as Status[];
+  const channelParams = searchParams.getAll("channel[]") as Channel[];
+  const q = (searchParams.get("q") || "").trim();
+  const from = searchParams.get("from"); // ISO
+  const to = searchParams.get("to");     // ISO
+
+  // Si recherche texte, on récupère d'abord les clients correspondants
+  let clientFilterIds: string[] | null = null;
+  if (q) {
+    const { data: clients, error: cliErr } = await supabaseServer
+      .from("clients")
+      .select("id")
+      .eq("user_id", userId)
+      .or(`email.ilike.%${q}%,phone.ilike.%${q}%,first_name.ilike.%${q}%,last_name.ilike.%${q}%`);
+    if (cliErr) return err("clients_search_failed", cliErr.message, 500);
+    clientFilterIds = (clients || []).map((c) => c.id);
+    if (clientFilterIds.length === 0) {
+      return NextResponse.json({ rows: [], total: 0 }); // rien ne matche
     }
+  }
 
-    // Résoudre le client dans le même tenant
-    let cid: string | null = client_id ?? null;
-    let clientRow: any = null;
+  // Requête principale avec comptage
+  let query = supabaseServer
+    .from("reminders")
+    .select("*", { count: "exact" })
+    .eq("user_id", userId);
 
-    if (!cid && client_email) {
-      const { data, error } = await supabaseServer
-        .from("clients")
-        .select("id, email, product, quantity, purchased_at, first_name, last_name, phone")
-        .eq("user_id", userId)
-        .eq("email", String(client_email).toLowerCase())
-        .single();
+  if (statusParams.length) query = query.in("status", statusParams);
+  if (channelParams.length) query = query.in("channel", channelParams);
+  if (clientFilterIds) query = query.in("client_id", clientFilterIds);
+  if (from) query = query.gte("scheduled_at", from);
+  if (to) query = query.lte("scheduled_at", to);
 
-      if (error || !data) {
-        return NextResponse.json({ ok: false, error: "client not found" }, { status: 400 });
-      }
-      cid = data.id;
-      clientRow = data;
-    }
+  // Pagination
+  const fromIdx = (page - 1) * pageSize;
+  const toIdx = fromIdx + pageSize - 1;
+  query = query.order("scheduled_at", { ascending: true }).range(fromIdx, toIdx);
 
-    if (!cid) {
-      return NextResponse.json(
-        { ok: false, error: "client_id or client_email is required" },
-        { status: 400 }
-      );
-    }
+  const { data, error, count } = await query;
+  if (error) return err("db_list_failed", error.message, 500);
 
-    // Estimation scheduled_at si manquant
-    let when: string | null = scheduled_at ?? null;
-    if (!when) {
-      if (!clientRow) {
-        const { data } = await supabaseServer
-          .from("clients")
-          .select("product, quantity, purchased_at")
-          .eq("user_id", userId)
-          .eq("id", cid)
-          .single();
-        clientRow = data;
-      }
-      when = estimateDepletionDate({
-        product: product ?? clientRow?.product,
-        quantity: clientRow?.quantity,
-        purchased_at: clientRow?.purchased_at,
-        delay_days,
-      });
-    }
+  const rows = data || [];
 
-    if (!when) {
-      return NextResponse.json(
-        { ok: false, error: "scheduled_at could not be determined" },
-        { status: 400 }
-      );
-    }
+  // Enrichir avec infos client (email/phone/nom)
+  const clientIds = Array.from(new Set(rows.map((r: any) => r.client_id))).filter(Boolean);
+  let clientMap: Record<string, any> = {};
+  if (clientIds.length) {
+    const { data: clients2, error: cli2Err } = await supabaseServer
+      .from("clients")
+      .select("id,email,phone,first_name,last_name")
+      .eq("user_id", userId)
+      .in("id", clientIds as string[]);
+    if (cli2Err) return err("clients_fetch_failed", cli2Err.message, 500);
+    clientMap = Object.fromEntries((clients2 || []).map((c) => [c.id, c]));
+  }
 
-    const insertPayload = {
-      user_id: userId,
-      client_id: cid,
-      product: product ?? clientRow?.product ?? null,
-      delay_days: delay_days ?? 0,
-      channel,
-      scheduled_at: new Date(when).toISOString(),
-      message: message ?? null,
-      status,
+  const enriched = rows.map((r: any) => {
+    const c = clientMap[r.client_id] || {};
+    return {
+      ...r,
+      client_email: c.email ?? null,
+      client_phone: c.phone ?? null,
+      client_first_name: c.first_name ?? null,
+      client_last_name: c.last_name ?? null,
     };
+  });
 
-    const { data, error } = await supabaseServer
-      .from("reminders")
-      .insert(insertPayload)
-      .select()
-      .single();
-
-    if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
-    return NextResponse.json({ ok: true, reminder: data });
-  } catch (err: any) {
-    return NextResponse.json({ ok: false, error: err?.message ?? "Unexpected error" }, { status: 500 });
-  }
-}
-
-/** PATCH /api/reminders */
-export async function PATCH(req: Request) {
-  try {
-    const userId = getUserIdOrDev();
-    const body = await req.json();
-    const { id, action } = body ?? {};
-    if (!id || !action) {
-      return NextResponse.json({ ok: false, error: "id et action requis" }, { status: 400 });
-    }
-
-    // Charger reminder + client (même tenant)
-    const { data: r, error } = await supabaseServer
-      .from("reminders")
-      .select("id, channel, status, clients:client_id(email, phone)")
-      .eq("user_id", userId)
-      .eq("id", id)
-      .single();
-
-    if (error || !r) {
-      return NextResponse.json({ ok: false, error: "reminder introuvable" }, { status: 404 });
-    }
-
-    if (action === "cancel") {
-      const { error: upErr } = await supabaseServer
-        .from("reminders")
-        .update({ status: "canceled" })
-        .eq("user_id", userId)
-        .eq("id", id);
-      if (upErr) return NextResponse.json({ ok: false, error: upErr.message }, { status: 500 });
-      return NextResponse.json({ ok: true, status: "canceled" });
-    }
-
-    if (action === "draft") {
-      const { error: upErr } = await supabaseServer
-        .from("reminders")
-        .update({ status: "draft" })
-        .eq("user_id", userId)
-        .eq("id", id);
-      if (upErr) return NextResponse.json({ ok: false, error: upErr.message }, { status: 500 });
-      return NextResponse.json({ ok: true, status: "draft" });
-    }
-
-    if (action === "send_now") {
-      // Mock provider en dev : validations minimales selon canal
-      const client = r.clients as { email?: string; phone?: string } | null;
-      const email = client?.email;
-      const phone = client?.phone;
-
-      if (r.channel === "email") {
-        const ok = !!email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-        if (!ok) return NextResponse.json({ ok: false, error: "email invalide" }, { status: 400 });
-      } else if (r.channel === "sms" || r.channel === "whatsapp") {
-        const ok = !!phone && /^\+?[1-9]\d{7,14}$/.test(phone);
-        if (!ok) return NextResponse.json({ ok: false, error: "phone E.164 invalide" }, { status: 400 });
-      }
-
-      const now = new Date().toISOString();
-      const { error: upErr } = await supabaseServer
-        .from("reminders")
-        .update({ status: "sent", sent_at: now })
-        .eq("user_id", userId)
-        .eq("id", id);
-      if (upErr) return NextResponse.json({ ok: false, error: upErr.message }, { status: 500 });
-
-      return NextResponse.json({ ok: true, status: "sent", sent_at: now });
-    }
-
-    return NextResponse.json({ ok: false, error: "action inconnue" }, { status: 400 });
-  } catch (err: any) {
-    return NextResponse.json({ ok: false, error: err?.message ?? "Unexpected error" }, { status: 500 });
-  }
+  return NextResponse.json({ rows: enriched, total: count ?? 0 });
 }
