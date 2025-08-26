@@ -1,19 +1,28 @@
 // app/api/reminders/generate/route.ts
-import { NextResponse } from "next/server";
-import { supabaseServer } from "@/lib/supabase-server";
-import { nowISO, errorJSON, toErrorInfo } from "@/lib/logging";
+export const runtime = 'nodejs'; // ✅ Force l'exécution côté Node (Luxon OK)
 
-// Types simples internes
-type Channel = "email" | "sms" | "whatsapp";
+import { NextRequest, NextResponse } from 'next/server';
+import { createClient } from '@supabase/supabase-js';
+import { DateTime } from 'luxon';
+import { parseSendWindow } from '@/lib/settings/sendWindow';
+import { addDaysAndClamp } from '@/lib/time/nextValidDate';
+
+type Body = {
+  dry_run?: boolean;
+  limit_clients?: number | null;
+  rule_ids?: string[] | null;
+  only_new_since?: string | null; // réservé V1.5 (purchases)
+};
+
 type Rule = {
   id: string;
   delay_days: number;
-  channel: Channel;
+  channel: 'email' | 'sms' | 'whatsapp';
   template: string | null;
   position: number;
-  enabled: boolean;
 };
-type Client = {
+
+type ClientRow = {
   id: string;
   email: string | null;
   phone: string | null;
@@ -21,165 +30,195 @@ type Client = {
   last_name: string | null;
 };
 
-function addDaysISO(days: number): string {
-  const d = new Date();
-  d.setUTCDate(d.getUTCDate() + days);
-  return d.toISOString();
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!;
+
+// ⚠️ Adapte à ton système d’auth server (supabase-auth-helpers si tu l’utilises).
+async function getUserId(req: NextRequest): Promise<string> {
+  // Exemple minimal : header X-User-Id (à remplacer par ta vraie auth)
+  const uid = req.headers.get('x-user-id');
+  if (!uid) throw new Error('UNAUTHENTICATED');
+  return uid;
 }
 
-function eligible(c: Client, channel: Channel): boolean {
-  if (channel === "email") return !!c.email;
-  if (channel === "sms" || channel === "whatsapp") return !!c.phone;
-  return false;
+function jsonError(code: string, message: string, status = 400) {
+  return NextResponse.json({ ok: false, code, message }, { status });
 }
 
-function err(code: string, message: string, status = 400) {
-  return NextResponse.json({ error: { code, message } }, { status });
-}
-
-async function getUserIdOrDev() {
-  // ⚠️ Adapte selon ton auth. Ici, fallback dev.
-  return process.env.DEV_USER_ID || "00000000-0000-0000-0000-000000000000";
-}
-
-export async function POST(_req: Request) {
+export async function POST(req: NextRequest) {
+  let user_id: string;
   try {
-    const userId = await getUserIdOrDev();
+    user_id = await getUserId(req);
+  } catch {
+    return jsonError('UNAUTHENTICATED', 'Authentication required.', 401);
+  }
 
-    // 1) Récup settings (timezone pas indispensable ici mais utile si tu veux affiner plus tard)
-    const { data: settings, error: setErr } = await supabaseServer
-      .from("settings")
-      .select("*")
-      .eq("user_id", userId)
-      .maybeSingle();
-    if (setErr) return err("settings_fetch_failed", setErr.message, 500);
+  const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+    auth: { persistSession: false },
+  });
 
-    // 2) Règles actives (ordonnées)
-    const { data: rules, error: ruleErr } = await supabaseServer
-      .from("reminder_rules")
-      .select("*")
-      .eq("user_id", userId)
-      .eq("enabled", true)
-      .order("position", { ascending: true }) as { data: Rule[] | null; error: any };
+  let body: Body = {};
+  try {
+    const parsed = await req.json();
+    if (parsed && typeof parsed === 'object') body = parsed as Body;
+  } catch {
+    // ignore → body = {}
+  }
 
-    if (ruleErr) return err("rules_fetch_failed", ruleErr.message, 500);
-    if (!rules || rules.length === 0) {
-      return NextResponse.json({ created: 0, skipped: 0, reason: "no_rules" });
-    }
+  const dryRun = Boolean(body.dry_run);
+  const limitClients = body.limit_clients ?? null;
+  const ruleIds = Array.isArray(body.rule_ids) ? body.rule_ids : null;
 
-    // 3) Clients
-    const { data: clients, error: cliErr } = await supabaseServer
-      .from("clients")
-      .select("id,email,phone,first_name,last_name")
-      .eq("user_id", userId) as { data: Client[] | null; error: any };
+  // 1) Charger settings (timezone + send_window)
+  const { data: settings, error: errSettings } = await supabase
+    .from('settings')
+    .select('timezone, send_window')
+    .eq('user_id', user_id)
+    .maybeSingle();
 
-    if (cliErr) return err("clients_fetch_failed", cliErr.message, 500);
-    if (!clients || clients.length === 0) {
-      return NextResponse.json({ created: 0, skipped: 0, reason: "no_clients" });
-    }
+  if (errSettings) return jsonError('SETTINGS_FETCH_FAILED', errSettings.message, 500);
 
-    // 4) Construire les "seeds" (combinaisons à créer) en filtrant l’éligibilité par canal
-    type Seed = { user_id: string; client_id: string; channel: Channel; delay_days: number };
-    const seeds: Seed[] = [];
+  const timezone = settings?.timezone || 'Europe/Paris';
+  const sendWindow = parseSendWindow(settings?.send_window);
+
+  // 2) Charger règles actives
+  let rulesQuery = supabase
+    .from('reminder_rules')
+    .select('id, delay_days, channel, template, position')
+    .eq('user_id', user_id)
+    .eq('enabled', true)
+    .order('position', { ascending: true })
+    .order('delay_days', { ascending: true });
+
+  if (ruleIds && ruleIds.length) {
+    rulesQuery = rulesQuery.in('id', ruleIds);
+  }
+
+  const { data: rules, error: errRules } = await rulesQuery as unknown as {
+    data: Rule[] | null; error: any;
+  };
+
+  if (errRules) return jsonError('RULES_FETCH_FAILED', errRules.message, 500);
+  if (!rules || rules.length === 0) return jsonError('MISSING_RULES', 'No enabled rules found.', 400);
+
+  // 3) Charger clients (non-unsubscribed)
+  let clientsQuery = supabase
+    .from('clients')
+    .select('id, email, phone, first_name, last_name')
+    .eq('user_id', user_id)
+    .or('unsubscribed.is.null,unsubscribed.eq.false'); // null/false => actif
+
+  if (limitClients && limitClients > 0) {
+    clientsQuery = clientsQuery.limit(limitClients);
+  }
+
+  const { data: clients, error: errClients } = await clientsQuery as unknown as {
+    data: ClientRow[] | null; error: any;
+  };
+
+  if (errClients) return jsonError('CLIENTS_FETCH_FAILED', errClients.message, 500);
+
+  // 4) Calculer scheduled_at pour chaque (client x règle)
+  const nowUTC = DateTime.utc().toJSDate();
+  type NewReminder = {
+    user_id: string;
+    client_id: string;
+    rule_id: string;
+    channel: 'email' | 'sms' | 'whatsapp';
+    message: string | null;
+    status: 'scheduled';
+    scheduled_at: string;    // ISO
+    next_attempt_at: string; // ISO
+    retry_count: number;
+  };
+
+  const toInsert: NewReminder[] = [];
+  const samples: Array<Pick<NewReminder, 'client_id' | 'rule_id' | 'channel' | 'scheduled_at'>> = [];
+
+  for (const c of clients || []) {
     for (const r of rules) {
-      for (const c of clients) {
-        if (!eligible(c, r.channel)) continue;
-        seeds.push({ user_id: userId, client_id: c.id, channel: r.channel, delay_days: r.delay_days });
-      }
-    }
-    if (seeds.length === 0) {
-      return NextResponse.json({ created: 0, skipped: 0, reason: "no_eligible_pairs" });
-    }
+      // V1 : base = now ; V1.5 (purchases) : base = purchased_at
+      const scheduledDate = addDaysAndClamp(nowUTC, r.delay_days ?? 0, timezone, sendWindow);
+      const scheduledISO = DateTime.fromJSDate(scheduledDate).toUTC().toISO();
 
-    // 5) Vérifier ceux qui existent déjà (idempotence) via la contrainte unique
-    //    On interroge les combinaisons existantes pour éviter les conflits
-    //    NB: si beaucoup de seeds, on peut batcher. Ici on fait simple.
-        // 5) Vérifier ceux qui existent déjà (idempotence)
-    const existingKeys: Record<string, 1> = {};
+      const row: NewReminder = {
+        user_id,
+        client_id: c.id,
+        rule_id: r.id,
+        channel: r.channel,
+        message: r.template ?? null, // V1: template brut (IA plus tard)
+        status: 'scheduled',
+        scheduled_at: scheduledISO!,
+        next_attempt_at: scheduledISO!,
+        retry_count: 0,
+      };
 
-    const { data: exist, error: existErr } = await supabaseServer
-      .from("reminders")
-      .select("user_id,client_id,channel,delay_days")
-      .eq("user_id", userId)
-      .in(
-        "client_id",
-        seeds.map((s) => s.client_id)
-      );
-
-    if (existErr) return err("existing_fetch_failed", existErr.message, 500);
-
-    for (const e of exist || []) {
-      const k = `${e.user_id}|${e.client_id}|${e.channel}|${e.delay_days}`;
-      existingKeys[k] = 1;
-    }
-
-
-    // 6) Construire les insertions (uniquement nouvelles)
-    const now = nowISO();
-    type InsertRow = {
-      user_id: string;
-      client_id: string;
-      channel: Channel;
-      delay_days: number;
-      message: string | null;
-      status: "scheduled";
-      scheduled_at: string;
-      next_attempt_at: string;
-      retry_count: number;
-      last_attempt_at: string | null;
-      last_error_code: string | null;
-      last_error: string | null;
-    };
-
-    const toInsert: InsertRow[] = [];
-    for (const r of rules) {
-      const scheduled_at = addDaysISO(r.delay_days); // UTC; fenêtre d’envoi sera respectée par le worker
-      for (const c of clients) {
-        if (!eligible(c, r.channel)) continue;
-        const key = `${userId}|${c.id}|${r.channel}|${r.delay_days}`;
-        if (existingKeys[key]) continue; // idempotence
-        toInsert.push({
-          user_id: userId,
+      toInsert.push(row);
+      if (samples.length < 10) {
+        samples.push({
           client_id: c.id,
+          rule_id: r.id,
           channel: r.channel,
-          delay_days: r.delay_days,
-          message: r.template ?? null, // peut être null → provider utilisera template par défaut
-          status: "scheduled",
-          scheduled_at,
-          next_attempt_at: scheduled_at,
-          retry_count: 0,
-          last_attempt_at: null,
-          last_error_code: null,
-          last_error: null,
+          scheduled_at: scheduledISO!,
         });
       }
     }
-
-    if (toInsert.length === 0) {
-      return NextResponse.json({ created: 0, skipped: seeds.length, reason: "all_already_exist" });
-    }
-
-    const { error: insErr } = await supabaseServer
-  .from("reminders")
-  .upsert(toInsert, {
-    onConflict: "user_id,client_id,channel,delay_days",
-    ignoreDuplicates: true
-  });
-    if (insErr) return err("insert_failed", insErr.message, 500);
-
-    return NextResponse.json({
-      processed_rules: rules.length,
-      processed_clients: clients.length,
-      created: toInsert.length,
-      skipped: seeds.length - toInsert.length,
-    });
-  } catch (e: any) {
-    const ei = toErrorInfo(e);
-    return NextResponse.json({ error: errorJSON(ei.code, ei.message) }, { status: 500 });
   }
-}
 
-export async function GET(req: Request) {
-  // facultatif: permettre GET pour debug
-  return POST(req);
+  if (dryRun) {
+    return NextResponse.json({
+      ok: true,
+      dry_run: true,
+      user_id,
+      stats: {
+        clients_considered: clients?.length ?? 0,
+        rules_considered: rules.length,
+        inserted: 0,
+        updated: 0,
+        skipped_existing: 0,
+      },
+      samples,
+    });
+  }
+
+  // 5) Upsert idempotent sur (user_id, client_id, rule_id)
+  // ⚠️ nécessite un index unique côté DB
+  let inserted = 0;
+  let updated = 0;
+  let skipped = 0;
+
+  const BATCH = 500;
+  for (let i = 0; i < toInsert.length; i += BATCH) {
+    const chunk = toInsert.slice(i, i + BATCH);
+    const { data, error } = await supabase
+      .from('reminders')
+      .upsert(chunk, {
+        onConflict: 'user_id,client_id,rule_id',
+        ignoreDuplicates: false,
+      })
+      .select('id, status, scheduled_at, updated_at');
+
+    if (error) return jsonError('REMINDERS_UPSERT_FAILED', error.message, 500);
+
+    if (data) {
+      inserted += data.length; // approximation utile (insert + update confondus)
+    }
+  }
+
+  // Approx du skipped (si besoin d’un comptage exact, on peut split exist/insert)
+  skipped = Math.max(0, (clients?.length ?? 0) * rules.length - inserted);
+
+  return NextResponse.json({
+    ok: true,
+    dry_run: false,
+    user_id,
+    stats: {
+      clients_considered: clients?.length ?? 0,
+      rules_considered: rules.length,
+      inserted,
+      updated, // non différencié dans cette version
+      skipped_existing: skipped,
+    },
+    samples,
+  });
 }
