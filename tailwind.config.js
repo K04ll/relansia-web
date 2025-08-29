@@ -4,8 +4,10 @@ module.exports = {
     "./app/**/*.{js,ts,jsx,tsx}",
     "./pages/**/*.{js,ts,jsx,tsx}",
     "./components/**/*.{js,ts,jsx,tsx}",
+    "./emails/**/*.{js,ts,jsx,tsx}",
+    "./lib/**/*.{js,ts,jsx,tsx}",
   ],
-  darkMode: "class", // important pour ton ThemeToggle
+  darkMode: "class", // on pilote le dark via la classe .dark sur <html>
   theme: {
     extend: {
       colors: {

@@ -23,8 +23,9 @@
   "dependencies": {
     "@react-email/render": "^1.2.1",
     "@supabase/supabase-js": "^2.56.0",
+    "csv-parse": "^6.1.0",
     "framer-motion": "^12.23.12",
-    "libphonenumber-js": "^1.12.13",
+    "libphonenumber-js": "^1.12.14",
     "lucide-react": "^0.541.0",
     "luxon": "3.4.4",
     "next": "15.4.6",

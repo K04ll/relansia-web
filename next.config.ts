@@ -1,13 +1,10 @@
+// next.config.ts
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  reactStrictMode: true,
   eslint: {
-    // Ne bloque pas le build à cause d’erreurs eslint
-    ignoreDuringBuilds: true,
-  },
-  typescript: {
-    // Ne bloque pas le build à cause d’erreurs TS
-    ignoreBuildErrors: true,
+    ignoreDuringBuilds: true, // ⬅ ignore toutes les erreurs ESLint au build
   },
 };
 
