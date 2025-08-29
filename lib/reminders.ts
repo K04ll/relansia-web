@@ -5,6 +5,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
 import type { Client, Reminder, ReminderStatus, Channel } from "@/lib/types";
+import type { SendPayload } from "@/lib/providers/types";
 import { addDaysISO, isValidEmail, normalizeE164 } from "@/lib/validators";
 import { sendViaProvider } from "@/lib/providers/channels";
 import { useSettings } from "@/lib/settings";
@@ -13,23 +14,34 @@ import { supabase } from "@/lib/supabase";
 type RemindersState = {
   reminders: Reminder[];
 
-  // existants
   addReminder: (
-    r: Omit<Reminder, "id" | "createdAt" | "updatedAt" | "status"> & { status?: ReminderStatus }
+    r: Omit<Reminder, "id" | "createdAt" | "updatedAt" | "status"> & {
+      status?: ReminderStatus;
+    }
   ) => Reminder;
   updateStatus: (id: string, status: ReminderStatus) => void;
   removeReminder: (id: string) => void;
   simulateSend: (id: string) => void;
   createFromClient: (
     client: Client,
-    opts: { product?: string; delayDays: number; channel: Channel; message: string }
+    opts: {
+      product?: string;
+      delayDays: number;
+      channel: Channel;
+      message: string;
+    }
   ) => Reminder;
   trySendNow: (id: string) => Promise<void>;
 
-  // nouveaux helpers (DB)
   addAndSaveReminder: (
     client: Client,
-    data: { product: string; delayDays: number; channel: Channel; scheduledAt: string; message: string }
+    data: {
+      product: string;
+      delayDays: number;
+      channel: Channel;
+      scheduledAt: string;
+      message: string;
+    }
   ) => Promise<Reminder | null>;
 
   loadFromDB: () => Promise<void>;
@@ -82,10 +94,10 @@ export const useReminders = create<RemindersState>()(
         const scheduledAt = addDaysISO(base, opts.delayDays);
         const r: Reminder = {
           id: nanoid(),
-          clientEmail: client.email,
+          clientEmail: client.email ?? undefined,
           clientName: `${client.first_name ?? ""} ${client.last_name ?? ""}`.trim(),
-          phone: client.phone,
-          product: opts.product ?? client.product,
+          phone: client.phone ?? undefined,
+          product: opts.product ?? client.product ?? undefined,
           delayDays: opts.delayDays,
           channel: opts.channel,
           scheduledAt,
@@ -105,8 +117,8 @@ export const useReminders = create<RemindersState>()(
 
         const { defaultCountry } = useSettings.getState().settings;
 
-        // Validations minimales selon le canal
-        if (r.channel === "email" && !isValidEmail(r.clientEmail)) {
+        // validations
+        if (r.channel === "email" && (!r.clientEmail || !isValidEmail(r.clientEmail))) {
           get().updateStatus(id, "failed");
           return;
         }
@@ -118,11 +130,34 @@ export const useReminders = create<RemindersState>()(
           }
         }
 
-        const res = await sendViaProvider(r.channel, r);
+        // construire payload propre
+        const payload: SendPayload =
+          r.channel === "email"
+            ? {
+                channel: "email",
+                to: r.clientEmail!,
+                subject: "Votre rappel",
+                message: r.message,
+              }
+            : r.channel === "sms"
+            ? {
+                channel: "sms",
+                to: normalizeE164(r.phone ?? undefined, defaultCountry as any)!,
+                message: r.message,
+              }
+            : {
+                channel: "whatsapp",
+                to: normalizeE164(r.phone ?? undefined, defaultCountry as any)!,
+                message: r.message,
+              };
+
+        const res = await sendViaProvider(r.channel, payload);
         if (res.ok) {
           set((s) => ({
             reminders: s.reminders.map((x) =>
-              x.id === id ? { ...x, status: "sent", sentAt: res.at, updatedAt: res.at } : x
+              x.id === id
+                ? { ...x, status: "sent", sentAt: res.at, updatedAt: res.at }
+                : x
             ),
           }));
         } else {
@@ -130,13 +165,11 @@ export const useReminders = create<RemindersState>()(
         }
       },
 
-      // ✅ Ajoute en local + upsert client + insert reminder en DB
       addAndSaveReminder: async (client, data) => {
-        // 1) optimistic UI
         const local = get().addReminder({
-          clientEmail: client.email,
+          clientEmail: client.email ?? undefined,
           clientName: `${client.first_name ?? ""} ${client.last_name ?? ""}`.trim(),
-          phone: client.phone,
+          phone: client.phone ?? undefined,
           product: data.product,
           delayDays: data.delayDays,
           channel: data.channel,
@@ -145,7 +178,6 @@ export const useReminders = create<RemindersState>()(
         });
 
         try {
-          // 2) upsert client par email
           const { data: upserted, error: upsertErr } = await supabase
             .from("clients")
             .upsert(
@@ -167,7 +199,6 @@ export const useReminders = create<RemindersState>()(
 
           if (upsertErr) throw upsertErr;
 
-          // 3) insert reminder lié au client
           const { error: remErr } = await supabase.from("reminders").insert({
             client_id: upserted!.id,
             product: data.product,
@@ -188,7 +219,6 @@ export const useReminders = create<RemindersState>()(
         }
       },
 
-      // ✅ Charge depuis Supabase et hydrate le store (dédupe par id)
       loadFromDB: async () => {
         const { data, error } = await supabase
           .from("reminders")
@@ -209,13 +239,14 @@ export const useReminders = create<RemindersState>()(
           const nameFromFields = `${row.clients?.first_name ?? ""} ${
             row.clients?.last_name ?? ""
           }`.trim();
-          const clientName = nameFromFields !== "" ? nameFromFields : row.clients?.email ?? "";
+          const clientName =
+            nameFromFields !== "" ? nameFromFields : row.clients?.email ?? "";
 
           get().addReminder({
-            clientEmail: row.clients?.email ?? "",
+            clientEmail: row.clients?.email ?? undefined,
             clientName,
             phone: row.clients?.phone ?? undefined,
-            product: row.product,
+            product: row.product ?? undefined,
             delayDays: row.delay_days,
             channel: row.channel,
             scheduledAt: row.scheduled_at,
