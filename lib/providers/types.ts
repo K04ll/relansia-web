@@ -2,97 +2,46 @@
 
 export type Channel = "email" | "sms" | "whatsapp";
 
-export type ReminderStatus =
-  | "draft"
-  | "scheduled"
-  | "sending"
-  | "sent"
-  | "failed"
-  | "canceled";
-
-export type Client = {
-  id: string;
-  user_id: string;
-  email: string | null;
-  phone: string | null;
-  first_name: string | null;
-  last_name: string | null;
-  unsubscribed?: boolean | null;
-  created_at?: string;
-};
-
-export type Reminder = {
-  id?: string;
-  user_id: string;
-  client_id: string;
-  rule_id?: string | null;
-  channel: Channel;
-  message: string | null;
-  status: ReminderStatus;
-  scheduled_at: string;
-  sent_at?: string | null;
-  retry_count: number;
-  next_attempt_at: string;
-  last_attempt_at?: string | null;
-  last_error_code?: string | null;
-  last_error?: string | null;
-  created_at?: string;
-};
-
-/* ======================================================
-   ➕ Types Provider : Ok / Err / Result
-   ====================================================== */
-
-/** Réponse succès */
+/** Résultat succès d’un provider */
 export type ProviderOk = {
   ok: true;
-  providerId: string;
-  at: string;          // timestamp ISO quand l’envoi a eu lieu
-  messageId?: string;  // identifiant provider (optionnel)
+  providerId: string;       // ex: "resend" | "twilio" | "whatsapp"
+  at: string;               // ISO date
+  messageId?: string;
 };
 
-/** Réponse erreur */
+/** Résultat erreur d’un provider */
 export type ProviderErr = {
   ok: false;
-  providerId: string;
-  at: string;          // timestamp ISO même si erreur
-  code: string;
-  message: string;
-  retryable?: boolean;
+  providerId: string;       // ex: "router" quand c’est une erreur côté dispatch
+  at: string;               // ISO date
+  code: string;             // ex: "CHANNEL_PAYLOAD_MISMATCH"
+  error: string;            // message lisible
+  retryable: boolean;       // 429, timeout, etc.
 };
 
-/** Union utilisée partout */
+/** Union de résultat provider */
 export type ProviderResult = ProviderOk | ProviderErr;
 
-/* ======================================================
-   ➕ Payloads d’envoi (utilisés dans channels.ts)
-   ====================================================== */
-
-export type BasePayload = {
-  reminderId: string;
-  clientId: string;
-};
-
-export type EmailPayload = BasePayload & {
+/** Payloads */
+export type EmailPayload = {
   channel: "email";
   to: string;
-  from?: string;
   subject?: string;
-  text: string;
-  html?: string;
+  message: string;
 };
 
-export type SmsPayload = BasePayload & {
+export type SmsPayload = {
   channel: "sms";
-  toE164: string;
-  body: string;
+  to: string;      // e164
+  message: string;
 };
 
-export type WhatsappPayload = BasePayload & {
+export type WhatsappPayload = {
   channel: "whatsapp";
-  toE164: string;
-  body: string;
-  mediaUrl?: string;
+  to: string;      // e164
+  message: string;
 };
 
+/** Union d’entrée pour le routeur */
 export type SendPayload = EmailPayload | SmsPayload | WhatsappPayload;

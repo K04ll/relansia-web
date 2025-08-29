@@ -1,51 +1,77 @@
-// lib/providers/channels.ts
 import type {
   Channel,
   SendPayload,
   ProviderResult,
+  ProviderErr,
   EmailPayload,
   SmsPayload,
-  WhatsAppPayload,
-} from "@/lib/providers/types";
+  WhatsappPayload,
+} from "./types";
 
-/** Sécurise : le channel passé doit matcher payload.channel */
-function checkChannelMatch(channel: Channel, payload: SendPayload): ProviderResult | null {
+const nowISO = () => new Date().toISOString();
+
+/** Vérifie que le channel demandé matche payload.channel */
+function checkChannelMatch(channel: Channel, payload: SendPayload): ProviderErr | undefined {
   if (payload.channel !== channel) {
-    return { ok: false, error: "channel_payload_mismatch", detail: `got ${payload.channel}, expected ${channel}` };
+    return {
+      ok: false,
+      providerId: "router",
+      at: nowISO(),
+      code: "CHANNEL_PAYLOAD_MISMATCH",
+      error: `got ${payload.channel}, expected ${channel}`,
+      retryable: false,
+    };
   }
-  return null;
+  return undefined;
 }
 
 export async function sendViaProvider(
   channel: Channel,
   payload: SendPayload,
-  _opts: Record<string, any> = {}
+  _opts: Record<string, unknown> = {}
 ): Promise<ProviderResult> {
-  try {
-    const mismatch = checkChannelMatch(channel, payload);
-    if (mismatch) return mismatch;
+  const mismatch = checkChannelMatch(channel, payload);
+  if (mismatch) return mismatch;
 
+  try {
     switch (channel) {
       case "email": {
         const { sendEmail } = await import("./email");
-        // narrow explicite pour TS
-        return sendEmail(payload as EmailPayload);
+        return await sendEmail(payload as EmailPayload);
       }
-
       case "sms": {
         const { sendSms } = await import("./sms");
-        return sendSms(payload as SmsPayload);
+        return await sendSms(payload as SmsPayload);
       }
-
       case "whatsapp": {
-        const { sendWhatsApp } = await import("./whatsapp");
-        return sendWhatsApp(payload as WhatsAppPayload);
+        const { sendWhatsapp } = await import("./whatsapp");
+        return await sendWhatsapp(payload as WhatsappPayload);
       }
-
-      default:
-        return { ok: false, error: "unknown_channel" };
+      default: {
+        return {
+          ok: false,
+          providerId: "router",
+          at: nowISO(),
+          code: "UNKNOWN_CHANNEL",
+          error: `unknown channel: ${String(channel)}`,
+          retryable: false,
+        };
+      }
     }
-  } catch (e: any) {
-    return { ok: false, error: "provider_dispatch_error", detail: String(e?.message || e) };
+  } catch (e: unknown) {
+    const err = e as { code?: string; message?: string; status?: number } | undefined;
+
+    const code = String(err?.code ?? (err?.status ? `HTTP_${err.status}` : "PROVIDER_DISPATCH_ERROR"));
+    const message = String(err?.message ?? e);
+    const retryable = err?.status === 429 || err?.code === "ETIMEDOUT";
+
+    return {
+      ok: false,
+      providerId: "router",
+      at: nowISO(),
+      code,
+      error: message,
+      retryable,
+    };
   }
 }
