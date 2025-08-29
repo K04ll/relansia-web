@@ -4,28 +4,7 @@ import { supabaseServer } from "@/lib/supabase-server";
 import { getUserIdOrDev } from "@/lib/auth";
 import { sendViaProvider } from "@/lib/providers/channels";
 import { nowISO, errorJSON } from "@/lib/logging";
-
-type Channel = "email" | "sms" | "whatsapp";
-
-type ClientRow = {
-  email: string | null;
-  phone: string | null;
-  first_name: string | null;
-  last_name: string | null;
-};
-
-// Type local pour l'objet envoyé au provider (champ first_name/last_name optionnels)
-type ProviderPayload = {
-  id: string;
-  channel: Channel;
-  message: string;
-  client: {
-    email: string | null;
-    phone: string | null;
-    first_name?: string | null;
-    last_name?: string | null;
-  };
-};
+import type { Channel, SendPayload, ProviderResult } from "@/lib/providers/types";
 
 export async function POST(req: Request) {
   try {
@@ -34,12 +13,12 @@ export async function POST(req: Request) {
     const id: string | undefined = body?.id;
     if (!id) return NextResponse.json({ error: "missing id" }, { status: 400 });
 
-    // 1) Récupération du reminder + tentative de jointure client
+    // 1) Récupération du reminder + jointure client (si dispo)
     const { data: r, error } = await supabaseServer
       .from("reminders")
       .select(
         `
-        id, user_id, client_id, channel, message, status,
+        id, user_id, client_id, channel, message, status, subject,
         clients:client_id ( email, phone, first_name, last_name )
       `
       )
@@ -53,8 +32,10 @@ export async function POST(req: Request) {
 
     const channel = r.channel as Channel;
 
-    // 2) Jointure typée en douceur (peut être absente si FK non configurée)
-    let client: ClientRow | null = (r as any).clients
+    // 2) Client depuis la jointure (peut être null si FK manquante)
+    let client:
+      | { email: string | null; phone: string | null; first_name: string | null; last_name: string | null }
+      | null = (r as any).clients
       ? {
           email: (r as any).clients.email ?? null,
           phone: (r as any).clients.phone ?? null,
@@ -63,7 +44,7 @@ export async function POST(req: Request) {
         }
       : null;
 
-    // 3) Si pas de jointure, récupérer le client via une requête dédiée
+    // 3) Fallback : fetch du client direct si jointure absente
     if (!client) {
       const { data: c, error: cErr } = await supabaseServer
         .from("clients")
@@ -153,22 +134,36 @@ export async function POST(req: Request) {
       .update({ status: "sending", last_attempt_at: nowISO() })
       .eq("id", id);
 
-    // 7) Construire un client "safe" qui satisfait explicitement le type
-    const safeClient: ProviderPayload["client"] = {
-      email: client.email ?? null,
-      phone: client.phone ?? null,
-      // first_name / last_name sont OPTIONNELS pour le provider
-      first_name: client.first_name ?? null,
-      last_name: client.last_name ?? null,
-    };
 
-    // 8) Envoi via provider (server-only)
-    const res = await sendViaProvider(channel, {
-      id: r.id,
-      channel,
-      message: r.message,
-      client: safeClient,
-    } as ProviderPayload); // on cast au type local pour lever toute ambiguïté TS
+
+// 7) Build payload
+let payload: SendPayload;
+if (channel === "email") {
+  // ici, on a déjà vérifié que client.email existe
+  payload = {
+    channel: "email",
+    to: client.email as string,
+    subject: "Votre rappel",
+    message: r.message ?? "",
+  };
+} else if (channel === "sms") {
+  payload = {
+    channel: "sms",
+    to: client.phone as string, // on a vérifié avant
+    message: r.message ?? "",
+  };
+} else {
+  // whatsapp
+  payload = {
+    channel: "whatsapp",
+    to: client.phone as string,
+    message: r.message ?? "",
+  };
+}
+
+// 8) Envoi via provider
+const res = await sendViaProvider(channel, payload);
+
 
     if (res.ok) {
       await supabaseServer
@@ -196,8 +191,8 @@ export async function POST(req: Request) {
         .from("reminders")
         .update({
           status: "failed",
-          last_error_code: res.error,
-          last_error: errorJSON(res.error, res.detail || res.error),
+          last_error_code: res.code,
+          last_error: res.error,
         })
         .eq("id", id);
 
@@ -207,10 +202,10 @@ export async function POST(req: Request) {
         channel,
         status: "failed",
         provider_id: null,
-        error_detail: { code: res.error, message: res.detail || res.error },
+        error_detail: { code: res.code, message: res.error },
       });
 
-      return NextResponse.json({ ok: false, error: res.error }, { status: 500 });
+      return NextResponse.json({ ok: false, error: res.code }, { status: 500 });
     }
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || "send_now error" }, { status: 500 });
