@@ -3,6 +3,9 @@ import { Inter } from "next/font/google";
 import "@/styles/tokens.css";
 import "./globals.css";
 import Link from "next/link";
+// ❌ import "@/styles/tokens.css";
+import "../styles/tokens.css";   // ✅ relatif depuis app/
+import "./globals.css";
 
 const inter = Inter({
   subsets: ["latin"],

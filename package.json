@@ -18,7 +18,7 @@
     "gen:dryrun": "curl -s -X POST http://localhost:3000/api/reminders/generate -H 'Content-Type: application/json' -d '{\"dry_run\":true,\"limit_clients\":25}' | jq",
     "gen:all": "curl -s -X POST http://localhost:3000/api/reminders/generate -H 'Content-Type: application/json' -d '{\"dry_run\":false}' | jq",
     "dispatch:local": "curl -s -X POST http://localhost:3000/api/reminders/dispatch -H \"Authorization: Bearer ${CRON_SECRET}\" | jq",
-    "prepare": "playwright install --with-deps || true"
+    "prepare": "node -e \"process.exit(0)\""
   },
   "dependencies": {
     "@react-email/render": "^1.2.1",
@@ -46,6 +46,7 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "autoprefixer": "^10.4.21",
     "axe-core": "^4.10.0",
     "eslint": "^9",
     "eslint-config-next": "15.4.6",
