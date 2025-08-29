@@ -40,29 +40,39 @@ export type Reminder = {
 };
 
 /* ======================================================
-   ➕ Ajout des types manquants pour channels.ts
+   ➕ Types Provider : Ok / Err / Result
    ====================================================== */
 
-export type ProviderResult =
-  | {
-      ok: true;
-      providerId: string;
-      messageId?: string;
-    }
-  | {
-      ok: false;
-      providerId: string;
-      code: string;
-      message: string;
-      retryable?: boolean;
-    };
+/** Réponse succès */
+export type ProviderOk = {
+  ok: true;
+  providerId: string;
+  at: string;          // timestamp ISO quand l’envoi a eu lieu
+  messageId?: string;  // identifiant provider (optionnel)
+};
+
+/** Réponse erreur */
+export type ProviderErr = {
+  ok: false;
+  providerId: string;
+  at: string;          // timestamp ISO même si erreur
+  code: string;
+  message: string;
+  retryable?: boolean;
+};
+
+/** Union utilisée partout */
+export type ProviderResult = ProviderOk | ProviderErr;
+
+/* ======================================================
+   ➕ Payloads d’envoi (utilisés dans channels.ts)
+   ====================================================== */
 
 export type BasePayload = {
   reminderId: string;
   clientId: string;
 };
 
-/** Email */
 export type EmailPayload = BasePayload & {
   channel: "email";
   to: string;
@@ -72,14 +82,12 @@ export type EmailPayload = BasePayload & {
   html?: string;
 };
 
-/** SMS */
 export type SmsPayload = BasePayload & {
   channel: "sms";
   toE164: string;
   body: string;
 };
 
-/** WhatsApp */
 export type WhatsappPayload = BasePayload & {
   channel: "whatsapp";
   toE164: string;
@@ -87,5 +95,4 @@ export type WhatsappPayload = BasePayload & {
   mediaUrl?: string;
 };
 
-/** Union finale utilisée par lib/providers/channels.ts */
 export type SendPayload = EmailPayload | SmsPayload | WhatsappPayload;
