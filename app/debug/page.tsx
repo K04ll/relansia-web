@@ -21,7 +21,7 @@ export default function DebugReminderPage() {
         >
           <option value="">— choisir un client —</option>
           {clients.map((c) => (
-            <option key={c.email} value={c.email}>
+            <option key={c.email ?? ""} value={c.email as string}>
               {c.first_name || c.last_name ? `${c.first_name ?? ""} ${c.last_name ?? ""}`.trim() : c.email}
             </option>
           ))}
