@@ -1,7 +1,9 @@
 // lib/types.ts
 
+// --- Channels ---------------------------------------------------------------
 export type Channel = "email" | "sms" | "whatsapp";
 
+// --- Reminder status --------------------------------------------------------
 export type ReminderStatus =
   | "draft"
   | "scheduled"
@@ -10,27 +12,38 @@ export type ReminderStatus =
   | "failed"
   | "canceled";
 
+// --- Client (UI + champs optionnels d'import/DB) ---------------------------
 export type Client = {
   id: string;
   email: string | null;
   phone: string | null;
   first_name?: string | null;
   last_name?: string | null;
+
+  // facultatifs (présents côté import/DB si tu les utilises)
+  product?: string | null;
+  quantity?: number | null;
+  purchased_at?: string | null; // ISO
 };
 
+// --- Reminder (forme utilisée côté UI/store) -------------------------------
 export type Reminder = {
   id: string;
-  user_id: string;
-  client_id: string;
+
+  // données “UI” (camelCase)
+  clientEmail?: string;         // ex: "a@b.com"
+  clientName?: string;          // ex: "Jane Doe"
+  phone?: string | null;        // e164 ou null
+  product?: string | null;
+  delayDays: number;            // (DB: delay_days)
   channel: Channel;
-  message: string | null;
+  scheduledAt: string;          // ISO (DB: scheduled_at)
+  message: string;
+
   status: ReminderStatus;
-  scheduled_at: string;
-  sent_at?: string | null;
-  retry_count: number;
-  next_attempt_at: string;
-  last_attempt_at?: string | null;
-  last_error_code?: string | null;
-  last_error?: string | null;
-  created_at?: string;
+
+  // méta
+  createdAt: string;            // ISO
+  updatedAt: string;            // ISO
+  sentAt?: string | null;       // ISO ou null
 };
