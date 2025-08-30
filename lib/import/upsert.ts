@@ -156,3 +156,8 @@ export async function upsertRows(userId: string, rows: CsvRow[], source: 'upload
 
   return { insertedClients, updatedClients, insertedPurchases, updatedPurchases, plannedReminders, invalidRows };
 }
+// Alias pratique pour la route d’upload qui traite 1 ligne à la fois
+export async function upsertRow(userId: string, row: CsvRow) {
+  // Retourne le même shape que upsertRows mais pour une seule ligne
+  return upsertRows(userId, [row], 'upload');
+}
