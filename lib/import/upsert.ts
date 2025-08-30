@@ -1,100 +1,158 @@
-// lib/import/upsert.ts
-import { createClient } from "@/lib/supabaseAdmin";
-import { normalizeEmail, normalizePhone, phoneDedupKey } from "@/lib/import/normalize";
+import { createClient } from '@supabase/supabase-js';
+import type { CsvRow, UpsertResult } from './types';
 
-export type ImportRow = {
-  email?: string;
-  phone?: string;
-  country?: string;
-  firstName?: string;
-  lastName?: string;
-  orderId?: string | number;
-  orderDate?: string;
-  orderTotal?: number | string;
-  currency?: string;
-  storeName?: string;
-  externalId?: string;
-};
+// service role (server-side only)
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_KEY!,
+  { auth: { persistSession: false } }
+);
 
-export type UpsertStats = { customersUpserted: number; purchasesUpserted: number; remindersCreated: number };
+export async function upsertClientAndPurchase(userId: string, row: CsvRow): Promise<{ clientId?: string; purchaseInserted: boolean }> {
+  // 1) Resolve/Upsert client by email or phone
+  let clientId: string | undefined;
 
-export async function upsertRow(userId: string, row: ImportRow): Promise<UpsertStats> {
-  const sb = createClient();
-  const email = normalizeEmail(row.email);
-  const phone = normalizePhone(row.phone, row.country || "FR");
-  const key = phoneDedupKey(row.phone, row.country || "FR");
+  if (row.email) {
+    const { data } = await supabase
+      .from('clients')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('email', row.email)
+      .maybeSingle();
 
-  if (!email && !phone.e164) return { customersUpserted: 0, purchasesUpserted: 0, remindersCreated: 0 };
-
-  const { data: existing } = await sb
-    .from("customers")
-    .select("id, email, phone_e164, phone_cc, phone_nsn")
-    .eq("user_id", userId)
-    .or([
-      email ? `email.eq.${email}` : "",
-      key.cc && key.nsn ? `and(phone_cc.eq.${key.cc},phone_nsn.eq.${key.nsn})` : ""
-    ].filter(Boolean).join(","));
-
-  let customerId: string | null = existing?.[0]?.id ?? null;
-
-  if (!customerId) {
-    const { data: inserted } = await sb
-      .from("customers")
-      .insert({
-        user_id: userId,
-        email: email ?? null,
-        phone_e164: phone.e164 ?? null,
-        phone_cc: phone.cc ?? null,
-        phone_nsn: phone.nsn ? String(phone.nsn) : null,
-        first_name: row.firstName ?? null,
-        last_name: row.lastName ?? null
-      })
-      .select("id")
-      .single();
-    customerId = inserted?.id ?? null;
-  } else {
-    await sb.from("customers").update({
-      email: existing?.[0]?.email ?? email ?? null,
-      phone_e164: existing?.[0]?.phone_e164 ?? phone.e164 ?? null,
-      phone_cc: existing?.[0]?.phone_cc ?? phone.cc ?? null,
-      phone_nsn: existing?.[0]?.phone_nsn ?? (phone.nsn ? String(phone.nsn) : null),
-      first_name: row.firstName ?? undefined,
-      last_name: row.lastName ?? undefined
-    }).eq("id", customerId);
-  }
-
-  let purchasesUpserted = 0;
-  let remindersCreated = 0;
-
-  if (customerId && row.orderId && row.orderDate) {
-    const total =
-      typeof row.orderTotal === "number" ? row.orderTotal :
-      row.orderTotal ? Number(String(row.orderTotal).replace(",", ".")) : null;
-
-    const { data: purchase, error } = await sb
-      .from("purchases")
-      .upsert({
-        user_id: userId,
-        customer_id: customerId,
-        order_id: String(row.orderId),
-        order_date: row.orderDate,
-        total_amount: total,
-        currency: row.currency ?? "EUR",
-        store_name: row.storeName ?? null,
-        external_id: row.externalId ?? null
-      }, { onConflict: "user_id,customer_id,order_id,order_date" })
-      .select("id")
-      .single();
-
-    if (!error && purchase?.id) {
-      purchasesUpserted = 1;
-      const { data: planned } = await sb.rpc("plan_reminders_for_purchase", {
-        p_user_id: userId,
-        p_purchase_id: purchase.id
-      });
-      remindersCreated = Array.isArray(planned) && planned[0]?.count ? Number(planned[0].count) : 0;
+    if (data?.id) {
+      clientId = data.id;
+      // update optional fields
+      await supabase.from('clients').update({
+        phone: row.phone ?? undefined,
+        first_name: row.first_name ?? undefined,
+        last_name: row.last_name ?? undefined,
+      }).eq('id', clientId);
     }
   }
 
-  return { customersUpserted: customerId ? 1 : 0, purchasesUpserted, remindersCreated };
+  if (!clientId && row.phone) {
+    const { data } = await supabase
+      .from('clients')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('phone', row.phone)
+      .maybeSingle();
+
+    if (data?.id) {
+      clientId = data.id;
+      await supabase.from('clients').update({
+        email: row.email ?? undefined,
+        first_name: row.first_name ?? undefined,
+        last_name: row.last_name ?? undefined,
+      }).eq('id', clientId);
+    }
+  }
+
+  if (!clientId) {
+    const ins = await supabase.from('clients').insert({
+      user_id: userId,
+      email: row.email ?? null,
+      phone: row.phone ?? null,
+      first_name: row.first_name ?? null,
+      last_name: row.last_name ?? null,
+    }).select('id').single();
+    clientId = ins.data?.id;
+  }
+
+  if (!clientId) return { purchaseInserted: false };
+
+  // 2) Upsert purchase by external_id
+  let purchaseInserted = false;
+  if (row.external_id) {
+    const { data: existing } = await supabase.from('purchases')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('external_id', row.external_id)
+      .maybeSingle();
+
+    if (!existing) {
+      await supabase.from('purchases').insert({
+        user_id: userId,
+        client_id: clientId,
+        external_id: row.external_id,
+        amount_cents: row.amount_cents ?? null,
+        currency: row.currency ?? 'EUR',
+        purchased_at: row.purchased_at ?? new Date().toISOString(),
+      });
+      purchaseInserted = true;
+    } else {
+      await supabase.from('purchases').update({
+        client_id: clientId,
+        amount_cents: row.amount_cents ?? null,
+        currency: row.currency ?? 'EUR',
+        purchased_at: row.purchased_at ?? new Date().toISOString(),
+      }).eq('id', existing.id);
+    }
+  } else {
+    // fallback non-idempotent: insert purchase w/o external_id (avoid if possible)
+    await supabase.from('purchases').insert({
+      user_id: userId,
+      client_id: clientId,
+      amount_cents: row.amount_cents ?? null,
+      currency: row.currency ?? 'EUR',
+      purchased_at: row.purchased_at ?? new Date().toISOString(),
+    });
+    purchaseInserted = true;
+  }
+
+  return { clientId, purchaseInserted };
+}
+
+export async function planDefaultReminders(userId: string, clientId: string) {
+  const now = new Date();
+  const addDays = (d: number) => new Date(now.getTime() + d*24*60*60*1000).toISOString();
+
+  const { data: client } = await supabase.from('clients').select('email, phone').eq('id', clientId).single();
+  const channel: 'email' | 'sms' = client?.email ? 'email' : (client?.phone ? 'sms' : 'email');
+
+  await supabase.from('reminders').insert([
+    { user_id: userId, client_id: clientId, channel, message: null, status: 'scheduled', scheduled_at: addDays(1), retry_count: 0, next_attempt_at: addDays(1) },
+    { user_id: userId, client_id: clientId, channel, message: null, status: 'scheduled', scheduled_at: addDays(7), retry_count: 0, next_attempt_at: addDays(7) },
+    { user_id: userId, client_id: clientId, channel, message: null, status: 'scheduled', scheduled_at: addDays(30), retry_count: 0, next_attempt_at: addDays(30) },
+  ]);
+}
+
+export async function upsertRows(userId: string, rows: CsvRow[], source: 'upload' | 'url'): Promise<UpsertResult> {
+  let insertedClients = 0, updatedClients = 0, insertedPurchases = 0, updatedPurchases = 0, plannedReminders = 0, invalidRows = 0;
+
+  for (const r of rows) {
+    if (!r.email && !r.phone) { invalidRows++; continue; }
+    const beforeClient = await supabase.from('clients').select('id').eq('user_id', userId)
+      .or(`email.eq.${r.email ?? '___'},phone.eq.${r.phone ?? '___'}`.replace('___','__null__')).limit(1);
+    const { clientId, purchaseInserted } = await upsertClientAndPurchase(userId, r);
+    const afterClient = clientId ? await supabase.from('clients').select('id').eq('id', clientId).single() : null;
+
+    if (clientId) {
+      const existedBefore = Boolean(beforeClient.data && beforeClient.data.length > 0);
+      if (existedBefore) updatedClients++; else insertedClients++;
+    }
+
+    if (r.external_id) {
+      const check = await supabase.from('purchases').select('id').eq('user_id', userId).eq('external_id', r.external_id).maybeSingle();
+      if (check?.data?.id) {
+        if (purchaseInserted) insertedPurchases++; else updatedPurchases++;
+      }
+    } else {
+      if (purchaseInserted) insertedPurchases++;
+    }
+
+    if (purchaseInserted && clientId) {
+      await planDefaultReminders(userId, clientId);
+      plannedReminders += 3;
+    }
+  }
+
+  await supabase.from('import_logs').insert({
+    user_id: userId,
+    source,
+    stats: { insertedClients, updatedClients, insertedPurchases, updatedPurchases, plannedReminders, invalidRows }
+  });
+
+  return { insertedClients, updatedClients, insertedPurchases, updatedPurchases, plannedReminders, invalidRows };
 }

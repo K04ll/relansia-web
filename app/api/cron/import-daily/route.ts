@@ -1,96 +1,48 @@
-import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabaseAdmin";
-import { syncCsvUrl } from "@/lib/import/syncCsvUrl";
+import { NextRequest, NextResponse } from 'next/server';
+import { createClient } from '@supabase/supabase-js';
+import { normalizeRow } from '@/lib/import/normalize';
+import { upsertRows } from '@/lib/import/upsert';
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_KEY!);
 
-function isAuthorized(req: Request) {
-  const cronHeader = req.headers.get("x-vercel-cron");
-  const auth = req.headers.get("authorization");
-  const bearerOk =
-    !!auth &&
-    auth.startsWith("Bearer ") &&
-    auth.slice(7) === process.env.CRON_SECRET;
+export async function POST(req: NextRequest) {
+  const isVercelCron = Boolean(req.headers.get('x-vercel-cron'));
+  const auth = req.headers.get('authorization');
 
-  return Boolean(cronHeader) || bearerOk;
-}
+  if (!isVercelCron && auth !== `Bearer ${process.env.CRON_SECRET}`) {
+    return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+  }
 
-export async function GET(req: Request) {
-  try {
-    if (!isAuthorized(req)) {
-      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-    }
+  // Sync tous les users qui ont une source active
+  const { data: users } = await supabase.from('data_sources')
+    .select('user_id').eq('active', true).not('url', 'is', null);
+  const userIds = Array.from(new Set((users ?? []).map(u => u.user_id)));
 
-    const sb = createClient();
-    const { data: sources, error } = await sb
-      .from("data_sources")
-      .select("user_id, url")
-      .match({ type: "csv_url", active: true });
+  const report: any[] = [];
 
-    if (error) {
-      return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
-    }
-
-    if (!sources?.length) {
-      return NextResponse.json({
-        ok: true,
-        results: [],
-        total: { workspaces: 0, rows: 0 },
-      });
-    }
-
-    const results: Array<Record<string, unknown>> = [];
-    let totalRows = 0;
+  for (const userId of userIds) {
+    const { data: sources } = await supabase.from('data_sources').select('url').eq('user_id', userId).eq('active', true);
+    if (!sources) continue;
 
     for (const s of sources) {
-      const startedAt = new Date().toISOString();
       try {
-        const stats = await syncCsvUrl(String(s.user_id), String(s.url));
-        const endedAt = new Date().toISOString();
-
-        await sb.from("sync_runs").insert({
-          user_id: s.user_id,
-          source_url: s.url,
-          started_at: startedAt,
-          ended_at: endedAt,
-          rows_in: stats.count,
-          customers_upserted: stats.customersUpserted,
-          purchases_upserted: stats.purchasesUpserted,
-          reminders_created: stats.remindersCreated,
-          status: "success",
+        const res = await fetch(s.url, { cache: 'no-store' });
+        const text = await res.text();
+        const [headerLine, ...lines] = text.split(/\r?\n/).filter(Boolean);
+        const headers = headerLine.split(',').map(h => h.trim());
+        const rows = lines.map(l => {
+          const cols = l.split(','); const o: Record<string, string> = {};
+          headers.forEach((h, i) => { o[h] = (cols[i] ?? '').trim(); });
+          return normalizeRow(o);
         });
-
-        totalRows += stats.count;
-        results.push({ userId: s.user_id, ok: true, url: s.url, ...stats });
-      } catch (e) {
-        const err = e as Error;
-        await sb.from("sync_runs").insert({
-          user_id: s.user_id,
-          source_url: s.url,
-          started_at: startedAt,
-          ended_at: new Date().toISOString(),
-          status: "failed",
-          error: (err?.message ?? "unknown").slice(0, 500),
-        });
-        results.push({
-          userId: s.user_id,
-          ok: false,
-          url: s.url,
-          error: err?.message,
-        });
+        const stats = await upsertRows(userId, rows, 'url');
+        await supabase.from('data_sources').update({ last_synced_at: new Date().toISOString() }).eq('user_id', userId).eq('url', s.url);
+        report.push({ userId, url: s.url, ...stats });
+      } catch (e: any) {
+        report.push({ userId, url: s.url, error: e?.message ?? 'fetch_failed' });
       }
     }
-
-    return NextResponse.json({
-      ok: true,
-      total: { workspaces: sources.length, rows: totalRows },
-      results,
-    });
-  } catch (err) {
-    return NextResponse.json(
-      { ok: false, error: (err as Error).message },
-      { status: 500 }
-    );
   }
+
+  return NextResponse.json({ ok: true, users: userIds.length, report });
 }

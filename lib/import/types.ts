@@ -1,13 +1,21 @@
-export type ImportRow = {
+export type CsvRow = {
+  external_id?: string;
   email?: string;
   phone?: string;
-  country?: string;       // ISO2 (ex: "FR") pour parsing tel
-  firstName?: string;
-  lastName?: string;
-  orderId: string;
-  orderDate: string;      // ISO8601
-  orderTotal?: number;
-  currency?: string;      // "EUR" par défaut
-  storeName?: string;
-  externalId?: string;    // identifiant ligne/source si dispo
+  first_name?: string;
+  last_name?: string;
+  amount?: string | number;     // e.g. "49.90"
+  amount_cents?: string | number;
+  currency?: string;            // e.g. "EUR"
+  purchased_at?: string;        // ISO or yyyy-mm-dd
+  date?: string;
+};
+
+export type UpsertResult = {
+  insertedClients: number;
+  updatedClients: number;
+  insertedPurchases: number;
+  updatedPurchases: number;
+  plannedReminders: number;
+  invalidRows: number;
 };

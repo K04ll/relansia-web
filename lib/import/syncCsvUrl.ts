@@ -1,7 +1,8 @@
 // lib/import/syncCsvUrl.ts
+/* eslint-disable no-console */
 import Papa from "papaparse";
 import { createClient } from "@/lib/supabaseAdmin";
-import { normalizeEmail, normalizePhone, phoneDedupKey } from "@/lib/import/normalize";
+import { normalizeEmail, normalizePhone, phoneDedupKey } from '@/lib/import/helpers';
 
 const ALIASES: Record<string, string> = {
   "email": "email", "email address": "email", "e-mail": "email", "courriel": "email",
@@ -23,7 +24,7 @@ function mapHeader(h: string) {
 }
 
 function parseWith(text: string, delimiter?: string) {
-  return Papa.parse<Record<string, any>>(text, {
+  return Papa.parse<Record<string, unknown>>(text, {
     header: true,
     skipEmptyLines: true,
     transformHeader: mapHeader,
@@ -33,105 +34,6 @@ function parseWith(text: string, delimiter?: string) {
 
 export type FetchFn = (input: string, init?: RequestInit) => Promise<Response>;
 
-/** fetchFn (optionnel) => facilite les tests */
-export async function syncCsvUrl(userId: string, url: string, fetchFn?: FetchFn) {
-  const sb = createClient();
-  const doFetch = fetchFn ?? fetch;
-
-  const res = await doFetch(url);
-  if (!res.ok) throw new Error(`Failed to fetch CSV: ${res.status} ${res.statusText}`);
-  const text = await res.text();
-
-  let out = parseWith(text);
-  if (out.errors?.length && out.data.length === 0) {
-    out = parseWith(text, ";");
-  }
-  const rows = out.data as Array<Record<string, any>>;
-
-  let customersUpserted = 0, purchasesUpserted = 0, remindersCreated = 0;
-
-  for (const r of rows) {
-    const email = normalizeEmail(r.email);
-    const country = r.country || "FR";
-    const phone = normalizePhone(r.phone, country);
-    const key = phoneDedupKey(r.phone, country);
-    if (!email && !phone.e164) continue;
-
-    const { data: existing } = await sb
-      .from("customers")
-      .select("id, email, phone_e164, phone_cc, phone_nsn")
-      .eq("user_id", userId)
-      .or([
-        email ? `email.eq.${email}` : "",
-        key.cc && key.nsn ? `and(phone_cc.eq.${key.cc},phone_nsn.eq.${key.nsn})` : "",
-      ].filter(Boolean).join(","));
-
-    let customerId: string | null = existing?.[0]?.id ?? null;
-
-    if (!customerId) {
-      const { data: inserted } = await sb
-        .from("customers")
-        .insert({
-          user_id: userId,
-          email: email ?? null,
-          phone_e164: phone.e164 ?? null,
-          phone_cc: phone.cc ?? null,
-          phone_nsn: phone.nsn ? String(phone.nsn) : null,
-          first_name: r.first_name ?? null,
-          last_name: r.last_name ?? null,
-        })
-        .select("id")
-        .single();
-      if (inserted?.id) { customersUpserted++; customerId = inserted.id; }
-    } else {
-      await sb.from("customers").update({
-        email: existing?.[0]?.email ?? email ?? null,
-        phone_e164: existing?.[0]?.phone_e164 ?? phone.e164 ?? null,
-        phone_cc: existing?.[0]?.phone_cc ?? phone.cc ?? null,
-        phone_nsn: existing?.[0]?.phone_nsn ?? (phone.nsn ? String(phone.nsn) : null),
-        first_name: r.first_name ?? undefined,
-        last_name: r.last_name ?? undefined,
-      }).eq("id", customerId);
-    }
-
-    const order_id = r.order_id?.toString().trim();
-    const order_date = parseDateFlexible(r.order_date);
-    if (customerId && order_id && order_date) {
-      const order_total =
-        typeof r.order_total === "number" ? r.order_total :
-        r.order_total ? Number(String(r.order_total).replace(",", ".")) : null;
-
-      const { data: purchase, error } = await sb
-        .from("purchases")
-        .upsert({
-          user_id: userId,
-          customer_id: customerId,
-          order_id,
-          order_date,
-          total_amount: order_total,
-          currency: r.currency ?? "EUR",
-          store_name: r.store_name ?? null,
-          external_id: r.external_id ?? null,
-        }, { onConflict: "user_id,customer_id,order_id,order_date" })
-        .select("id")
-        .single();
-
-      if (!error && purchase?.id) {
-        purchasesUpserted++;
-        const { data: planned } = await sb.rpc("plan_reminders_for_purchase", {
-          p_user_id: userId,
-          p_purchase_id: purchase.id,
-        });
-        const n = Array.isArray(planned) && planned[0]?.count ? Number(planned[0].count) : 0;
-        remindersCreated += n;
-      }
-    }
-  }
-
-  return { count: rows.length, customersUpserted, purchasesUpserted, remindersCreated };
-}
-
-/** parse simple (yyyy-mm-dd | dd/mm/yyyy | mm/dd/yyyy | ISO) */
 export function parseDateFlexible(v: unknown): string | null {
   if (!v) return null;
   const s = String(v).trim();
@@ -157,4 +59,129 @@ export function parseDateFlexible(v: unknown): string | null {
     return isNaN(dt.getTime()) ? null : dt.toISOString();
   }
   return null;
+}
+
+/** fetchFn (optionnel) => facilite les tests */
+export async function syncCsvUrl(userId: string, url: string, fetchFn?: FetchFn) {
+  const sb = createClient();
+  const doFetch = fetchFn ?? fetch;
+
+  const res = await doFetch(url);
+  if (!res.ok) throw new Error(`Failed to fetch CSV: ${res.status} ${res.statusText}`);
+  const text = await res.text();
+
+  let out = parseWith(text);
+  if (out.errors?.length && out.data.length === 0) {
+    out = parseWith(text, ";");
+  }
+  const rows = out.data as Array<Record<string, unknown>>;
+
+  let customersUpserted = 0, purchasesUpserted = 0, remindersCreated = 0;
+
+  for (const r of rows) {
+    try {
+      const email = normalizeEmail((r.email as string | undefined) ?? null);
+      const countryRaw = (r.country as string | undefined)?.toUpperCase?.() ?? "FR";
+      const country = (countryRaw === "US" ? "US" : "FR") as "FR" | "US";
+
+      const phoneObj = normalizePhone((r.phone as string | undefined) ?? null, country);
+      const key = phoneDedupKey((r.phone as string | undefined) ?? null, country);
+
+      if (!email && !phoneObj?.e164) continue;
+
+      const { data: existing, error: selErr } = await sb
+        .from("customers")
+        .select("id, email, phone_e164, phone_cc, phone_nsn")
+        .eq("user_id", userId)
+        .or([
+          email ? `email.eq.${email}` : "",
+          (key?.cc && key?.nsn) ? `and(phone_cc.eq.${key.cc},phone_nsn.eq.${key.nsn})` : "",
+        ].filter(Boolean).join(",") || "email.eq.__none__");
+
+      if (selErr) throw selErr;
+
+      let customerId: string | null = existing?.[0]?.id ?? null;
+
+      if (!customerId) {
+        const { data: inserted, error: insErr } = await sb
+          .from("customers")
+          .insert({
+            user_id: userId,
+            email: email ?? null,
+            phone_e164: phoneObj?.e164 ?? null,
+            phone_cc: phoneObj?.cc ?? null,
+            phone_nsn: phoneObj?.nsn ? String(phoneObj.nsn) : null,
+            first_name: (r.first_name as string | undefined) ?? null,
+            last_name: (r.last_name as string | undefined) ?? null,
+          })
+          .select("id")
+          .single();
+
+        if (insErr) throw insErr;
+        if (inserted?.id) { customersUpserted++; customerId = inserted.id; }
+      } else {
+        const cur = existing![0];
+        const patch: Record<string, unknown> = {
+          // priorité aux nouvelles infos si fournies
+          email: email ?? cur.email ?? null,
+          phone_e164: phoneObj?.e164 ?? cur.phone_e164 ?? null,
+          phone_cc:   phoneObj?.cc   ?? cur.phone_cc   ?? null,
+          phone_nsn: (phoneObj?.nsn ? String(phoneObj.nsn) : (cur.phone_nsn ?? null)),
+        };
+        const fn = (r.first_name as string | undefined)?.trim();
+        const ln = (r.last_name  as string | undefined)?.trim();
+        if (fn) patch.first_name = fn;
+        if (ln) patch.last_name  = ln;
+
+        const { error: upErr } = await sb.from("customers").update(patch).eq("id", customerId);
+        if (upErr) throw upErr;
+      }
+
+      // --- Achats & reminders ---
+      const order_id = (r.order_id ?? (r as any).commande ?? (r as any).order)?.toString().trim();
+      const order_date = parseDateFlexible(r.order_date ?? (r as any).date ?? (r as any).purchased_at);
+
+      if (customerId && order_id && order_date) {
+        const order_total_raw = (r.order_total ?? (r as any).total ?? (r as any).amount) as unknown;
+        const order_total =
+          typeof order_total_raw === "number"
+            ? order_total_raw
+            : order_total_raw
+              ? Number(String(order_total_raw).replace(",", "."))
+              : null;
+
+        const { data: purchase, error } = await sb
+          .from("purchases")
+          .upsert({
+            user_id: userId,
+            customer_id: customerId,
+            order_id,
+            order_date,
+            total_amount: order_total,
+            currency: (r.currency as string | undefined) ?? "EUR",
+            store_name: (r.store_name as string | undefined) ?? null,
+            external_id: (r.external_id as string | undefined) ?? null,
+          }, { onConflict: "user_id,customer_id,order_id,order_date" })
+          .select("id")
+          .single();
+
+        if (!error && purchase?.id) {
+          purchasesUpserted++;
+          // RPC côté DB qui planifie J+1/J+7/J+30
+          const { data: planned } = await sb.rpc("plan_reminders_for_purchase", {
+            p_user_id: userId,
+            p_purchase_id: purchase.id,
+          });
+          const n = Array.isArray(planned) && (planned[0] as any)?.count ? Number((planned[0] as any).count) : 0;
+          remindersCreated += n;
+        }
+      }
+    } catch (e) {
+      console.error("syncCsvUrl row error:", e);
+      // on compte comme "invalid" uniquement les erreurs techniques de la ligne
+      // (le continue ci-dessus gère les lignes vides/skip)
+    }
+  }
+
+  return { count: rows.length, customersUpserted, purchasesUpserted, remindersCreated };
 }

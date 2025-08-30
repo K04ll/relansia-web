@@ -6,6 +6,13 @@ import { sendViaProvider } from "@/lib/providers/channels";
 import { nowISO, errorJSON } from "@/lib/logging";
 import type { Channel, SendPayload, ProviderResult } from "@/lib/providers/types";
 
+type ClientRow = {
+  email: string | null;
+  phone: string | null;
+  first_name: string | null;
+  last_name: string | null;
+};
+
 export async function POST(req: Request) {
   try {
     const userId = getUserIdOrDev();
@@ -13,12 +20,12 @@ export async function POST(req: Request) {
     const id: string | undefined = body?.id;
     if (!id) return NextResponse.json({ error: "missing id" }, { status: 400 });
 
-    // 1) Récupération du reminder + jointure client (si dispo)
+    // 1) Récupération du reminder + éventuelle jointure client
     const { data: r, error } = await supabaseServer
       .from("reminders")
       .select(
         `
-        id, user_id, client_id, channel, message, status, subject,
+        id, user_id, client_id, channel, message, subject, status,
         clients:client_id ( email, phone, first_name, last_name )
       `
       )
@@ -32,10 +39,8 @@ export async function POST(req: Request) {
 
     const channel = r.channel as Channel;
 
-    // 2) Client depuis la jointure (peut être null si FK manquante)
-    let client:
-      | { email: string | null; phone: string | null; first_name: string | null; last_name: string | null }
-      | null = (r as any).clients
+    // 2) Jointure « douce » (peut être absente si la FK n’existe pas)
+    let client: ClientRow | null = (r as any).clients
       ? {
           email: (r as any).clients.email ?? null,
           phone: (r as any).clients.phone ?? null,
@@ -44,7 +49,7 @@ export async function POST(req: Request) {
         }
       : null;
 
-    // 3) Fallback : fetch du client direct si jointure absente
+    // 3) Fallback : récupérer le client par requête dédiée si pas de jointure
     if (!client) {
       const { data: c, error: cErr } = await supabaseServer
         .from("clients")
@@ -74,7 +79,7 @@ export async function POST(req: Request) {
       };
     }
 
-    // 4) Toujours pas de client ? → erreur claire
+    // 4) Toujours pas de client → erreur claire
     if (!client) {
       const code = "client_not_found";
       await supabaseServer
@@ -99,7 +104,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: code }, { status: 404 });
     }
 
-    // 5) Vérifier le destinataire requis selon le canal
+    // 5) Vérifier qu’on a bien un destinataire selon le canal
     const missingRecipient =
       (channel === "email" && !client.email) ||
       ((channel === "sms" || channel === "whatsapp") && !client.phone);
@@ -128,43 +133,52 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: code }, { status: 400 });
     }
 
-    // 6) Passer en "sending" avant l'appel provider
+    // 6) Passer en "sending" avant l’appel provider
     await supabaseServer
       .from("reminders")
       .update({ status: "sending", last_attempt_at: nowISO() })
       .eq("id", id);
 
+    // 7) Construire le SendPayload EXACT (avec `to`)
+    let payload: SendPayload;
+    if (channel === "email") {
+      payload = {
+        channel: "email",
+        to: client.email as string, // garanti par missingRecipient ci-dessus
+        subject: r.subject ?? "Votre rappel",
+        message: r.message ?? "",
+      };
+    } else if (channel === "sms") {
+      payload = {
+        channel: "sms",
+        to: client.phone as string,
+        message: r.message ?? "",
+      };
+    } else {
+      // whatsapp
+      payload = {
+        channel: "whatsapp",
+        to: client.phone as string,
+        message: r.message ?? "",
+      };
+    }
 
+    // 8) Envoi via provider
+    let res: ProviderResult;
+    try {
+      res = await sendViaProvider(channel, payload);
+    } catch (e: any) {
+      res = {
+        ok: false,
+        providerId: "router",
+        at: nowISO(),
+        code: "PROVIDER_DISPATCH_ERROR",
+        error: e?.message ?? String(e),
+        retryable: false,
+      };
+    }
 
-// 7) Build payload
-let payload: SendPayload;
-if (channel === "email") {
-  // ici, on a déjà vérifié que client.email existe
-  payload = {
-    channel: "email",
-    to: client.email as string,
-    subject: "Votre rappel",
-    message: r.message ?? "",
-  };
-} else if (channel === "sms") {
-  payload = {
-    channel: "sms",
-    to: client.phone as string, // on a vérifié avant
-    message: r.message ?? "",
-  };
-} else {
-  // whatsapp
-  payload = {
-    channel: "whatsapp",
-    to: client.phone as string,
-    message: r.message ?? "",
-  };
-}
-
-// 8) Envoi via provider
-const res = await sendViaProvider(channel, payload);
-
-
+    // 9) Traiter la réponse provider
     if (res.ok) {
       await supabaseServer
         .from("reminders")
@@ -192,7 +206,7 @@ const res = await sendViaProvider(channel, payload);
         .update({
           status: "failed",
           last_error_code: res.code,
-          last_error: res.error,
+          last_error: errorJSON(res.code, res.error),
         })
         .eq("id", id);
 
