@@ -161,43 +161,46 @@ export async function syncCsvUrl(userId: string, url: string, fetchFn?: FetchFn)
       }
 
       // --- Achats & reminders ---
-      const order_id = (r.order_id ?? (r as any).commande ?? (r as any).order)?.toString().trim();
-      const order_date = parseDateFlexible(r.order_date ?? (r as any).date ?? (r as any).purchased_at);
+const order_id = (r.order_id ?? (r as any).commande ?? (r as any).order)?.toString().trim();
+const order_date = parseDateFlexible(r.order_date ?? (r as any).date ?? (r as any).purchased_at);
 
-      if (customerId && order_id && order_date) {
-        const order_total_raw = (r.order_total ?? (r as any).total ?? (r as any).amount) as unknown;
-        const order_total =
-          typeof order_total_raw === "number"
-            ? order_total_raw
-            : order_total_raw
-              ? Number(String(order_total_raw).replace(",", "."))
-              : null;
+if (customerId && order_id && order_date) {
+  const order_total_raw = (r.order_total ?? (r as any).total ?? (r as any).amount) as unknown;
+  const order_total =
+    typeof order_total_raw === "number"
+      ? order_total_raw
+      : order_total_raw
+        ? Number(String(order_total_raw).replace(",", "."))
+        : null;
 
-        const { data: purchase, error } = await sb
-          .from("purchases")
-          .upsert({
-            user_id: userId,
-            customer_id: customerId,
-            order_id,
-            order_date,
-            total_amount: order_total,
-            currency: (r.currency as string | undefined) ?? "EUR",
-            store_name: (r.store_name as string | undefined) ?? null,
-            external_id: (r.external_id as string | undefined) ?? null,
-          }, { onConflict: "user_id,customer_id,order_id,order_date" })
-          .select("id")
-          .single();
+  const { data: purchase, error } = await sb
+    .from("purchases")
+    .upsert(
+      {
+        user_id: userId,
+        customer_id: customerId,
+        order_id,
+        order_date,
+        order_total, // <— colonne réelle (numeric)
+        currency: (r.currency as string | undefined) ?? "EUR",
+        external_id: (r.external_id as string | undefined) ?? null,
+      },
+      { onConflict: "user_id,customer_id,order_id,order_date" }
+    )
+    .select("id")
+    .single();
 
-        if (!error && purchase?.id) {
-          purchasesUpserted++;
-          const { data: planned } = await sb.rpc("plan_reminders_for_purchase", {
-            p_user_id: userId,
-            p_purchase_id: purchase.id,
-          });
-          const n = Array.isArray(planned) && (planned[0] as any)?.count ? Number((planned[0] as any).count) : 0;
-          remindersCreated += n;
-        }
-      }
+  if (!error && purchase?.id) {
+    purchasesUpserted++;
+    const { data: planned } = await sb.rpc("plan_reminders_for_purchase", {
+      p_user_id: userId,
+      p_purchase_id: purchase.id,
+    });
+    const n = Array.isArray(planned) && (planned[0] as any)?.count ? Number((planned[0] as any).count) : 0;
+    remindersCreated += n;
+  }
+}
+
     } catch (e) {
       console.error("syncCsvUrl row error:", e);
     }
