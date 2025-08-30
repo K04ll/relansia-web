@@ -1,3 +1,4 @@
+// lib/import/upsert.ts
 import { createClient } from '@supabase/supabase-js';
 import type { CsvRow, UpsertResult } from './types';
 
@@ -8,10 +9,13 @@ const supabase = createClient(
   { auth: { persistSession: false } }
 );
 
-export async function upsertClientAndPurchase(userId: string, row: CsvRow): Promise<{ clientId?: string; purchaseInserted: boolean }> {
-  // 1) Resolve/Upsert client by email or phone
+export async function upsertClientAndPurchase(
+  userId: string,
+  row: CsvRow
+): Promise<{ clientId?: string; purchaseInserted: boolean }> {
   let clientId: string | undefined;
 
+  // -------- Client par email --------
   if (row.email) {
     const { data } = await supabase
       .from('clients')
@@ -22,7 +26,6 @@ export async function upsertClientAndPurchase(userId: string, row: CsvRow): Prom
 
     if (data?.id) {
       clientId = data.id;
-      // update optional fields
       await supabase.from('clients').update({
         phone: row.phone ?? undefined,
         first_name: row.first_name ?? undefined,
@@ -31,6 +34,7 @@ export async function upsertClientAndPurchase(userId: string, row: CsvRow): Prom
     }
   }
 
+  // -------- Client par phone --------
   if (!clientId && row.phone) {
     const { data } = await supabase
       .from('clients')
@@ -49,6 +53,7 @@ export async function upsertClientAndPurchase(userId: string, row: CsvRow): Prom
     }
   }
 
+  // -------- Insert client --------
   if (!clientId) {
     const ins = await supabase.from('clients').insert({
       user_id: userId,
@@ -62,10 +67,11 @@ export async function upsertClientAndPurchase(userId: string, row: CsvRow): Prom
 
   if (!clientId) return { purchaseInserted: false };
 
-  // 2) Upsert purchase by external_id
+  // -------- Purchase --------
   let purchaseInserted = false;
   if (row.external_id) {
-    const { data: existing } = await supabase.from('purchases')
+    const { data: existing } = await supabase
+      .from('purchases')
       .select('id')
       .eq('user_id', userId)
       .eq('external_id', row.external_id)
@@ -90,7 +96,6 @@ export async function upsertClientAndPurchase(userId: string, row: CsvRow): Prom
       }).eq('id', existing.id);
     }
   } else {
-    // fallback non-idempotent: insert purchase w/o external_id (avoid if possible)
     await supabase.from('purchases').insert({
       user_id: userId,
       client_id: clientId,
@@ -106,37 +111,100 @@ export async function upsertClientAndPurchase(userId: string, row: CsvRow): Prom
 
 export async function planDefaultReminders(userId: string, clientId: string) {
   const now = new Date();
-  const addDays = (d: number) => new Date(now.getTime() + d*24*60*60*1000).toISOString();
+  const addDays = (d: number) =>
+    new Date(now.getTime() + d * 24 * 60 * 60 * 1000).toISOString();
 
-  const { data: client } = await supabase.from('clients').select('email, phone').eq('id', clientId).single();
-  const channel: 'email' | 'sms' = client?.email ? 'email' : (client?.phone ? 'sms' : 'email');
+  const { data: client } = await supabase
+    .from('clients')
+    .select('email, phone')
+    .eq('id', clientId)
+    .single();
+
+  const channel: 'email' | 'sms' =
+    client?.email ? 'email' : client?.phone ? 'sms' : 'email';
 
   await supabase.from('reminders').insert([
-    { user_id: userId, client_id: clientId, channel, message: null, status: 'scheduled', scheduled_at: addDays(1), retry_count: 0, next_attempt_at: addDays(1) },
-    { user_id: userId, client_id: clientId, channel, message: null, status: 'scheduled', scheduled_at: addDays(7), retry_count: 0, next_attempt_at: addDays(7) },
-    { user_id: userId, client_id: clientId, channel, message: null, status: 'scheduled', scheduled_at: addDays(30), retry_count: 0, next_attempt_at: addDays(30) },
+    {
+      user_id: userId,
+      client_id: clientId,
+      channel,
+      message: null,
+      status: 'scheduled',
+      scheduled_at: addDays(1),
+      retry_count: 0,
+      next_attempt_at: addDays(1),
+    },
+    {
+      user_id: userId,
+      client_id: clientId,
+      channel,
+      message: null,
+      status: 'scheduled',
+      scheduled_at: addDays(7),
+      retry_count: 0,
+      next_attempt_at: addDays(7),
+    },
+    {
+      user_id: userId,
+      client_id: clientId,
+      channel,
+      message: null,
+      status: 'scheduled',
+      scheduled_at: addDays(30),
+      retry_count: 0,
+      next_attempt_at: addDays(30),
+    },
   ]);
 }
 
-export async function upsertRows(userId: string, rows: CsvRow[], source: 'upload' | 'url'): Promise<UpsertResult> {
-  let insertedClients = 0, updatedClients = 0, insertedPurchases = 0, updatedPurchases = 0, plannedReminders = 0, invalidRows = 0;
+export async function upsertRows(
+  userId: string,
+  rows: CsvRow[],
+  source: 'upload' | 'url'
+): Promise<UpsertResult> {
+  let insertedClients = 0,
+    updatedClients = 0,
+    insertedPurchases = 0,
+    updatedPurchases = 0,
+    plannedReminders = 0,
+    invalidRows = 0;
 
   for (const r of rows) {
-    if (!r.email && !r.phone) { invalidRows++; continue; }
-    const beforeClient = await supabase.from('clients').select('id').eq('user_id', userId)
-      .or(`email.eq.${r.email ?? '___'},phone.eq.${r.phone ?? '___'}`.replace('___','__null__')).limit(1);
+    if (!r.email && !r.phone) {
+      invalidRows++;
+      continue;
+    }
+
+    const beforeClient = await supabase
+      .from('clients')
+      .select('id')
+      .eq('user_id', userId)
+      .or(
+        `email.eq.${r.email ?? '___'},phone.eq.${
+          r.phone ?? '___'
+        }`.replace('___', '__null__')
+      )
+      .limit(1);
+
     const { clientId, purchaseInserted } = await upsertClientAndPurchase(userId, r);
-    const afterClient = clientId ? await supabase.from('clients').select('id').eq('id', clientId).single() : null;
 
     if (clientId) {
       const existedBefore = Boolean(beforeClient.data && beforeClient.data.length > 0);
-      if (existedBefore) updatedClients++; else insertedClients++;
+      if (existedBefore) updatedClients++;
+      else insertedClients++;
     }
 
     if (r.external_id) {
-      const check = await supabase.from('purchases').select('id').eq('user_id', userId).eq('external_id', r.external_id).maybeSingle();
+      const check = await supabase
+        .from('purchases')
+        .select('id')
+        .eq('user_id', userId)
+        .eq('external_id', r.external_id)
+        .maybeSingle();
+
       if (check?.data?.id) {
-        if (purchaseInserted) insertedPurchases++; else updatedPurchases++;
+        if (purchaseInserted) insertedPurchases++;
+        else updatedPurchases++;
       }
     } else {
       if (purchaseInserted) insertedPurchases++;
@@ -151,13 +219,35 @@ export async function upsertRows(userId: string, rows: CsvRow[], source: 'upload
   await supabase.from('import_logs').insert({
     user_id: userId,
     source,
-    stats: { insertedClients, updatedClients, insertedPurchases, updatedPurchases, plannedReminders, invalidRows }
+    stats: {
+      insertedClients,
+      updatedClients,
+      insertedPurchases,
+      updatedPurchases,
+      plannedReminders,
+      invalidRows,
+    },
   });
 
-  return { insertedClients, updatedClients, insertedPurchases, updatedPurchases, plannedReminders, invalidRows };
+  return {
+    insertedClients,
+    updatedClients,
+    insertedPurchases,
+    updatedPurchases,
+    plannedReminders,
+    invalidRows,
+  };
 }
-// Alias pratique pour la route d’upload qui traite 1 ligne à la fois
+
+/**
+ * ✅ Alias pratique pour la route d’upload
+ * Retourne { customersUpserted, purchasesUpserted, remindersCreated }
+ */
 export async function upsertRow(userId: string, row: CsvRow) {
-  // Retourne le même shape que upsertRows mais pour une seule ligne
-  return upsertRows(userId, [row], 'upload');
+  const r = await upsertRows(userId, [row], 'upload');
+  return {
+    customersUpserted: r.insertedClients + r.updatedClients,
+    purchasesUpserted: r.insertedPurchases + r.updatedPurchases,
+    remindersCreated: r.plannedReminders,
+  };
 }
