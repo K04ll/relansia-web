@@ -34,6 +34,41 @@ function parseWith(text: string, delimiter?: string) {
 
 export type FetchFn = (input: string, init?: RequestInit) => Promise<Response>;
 
+/** Suivi robuste des CSV Google Drive (303 -> drive.usercontent) */
+async function fetchCsvText(doFetch: FetchFn, url: string): Promise<string> {
+  // 1) Essai standard (follow)
+  try {
+    const r = await doFetch(url, { redirect: "follow" });
+    if (r.ok) return await r.text();
+  } catch (_) {}
+
+  // 2) HEAD puis GET sur Location (cas 303 Drive)
+  try {
+    const head = await doFetch(url, { method: "HEAD", redirect: "manual" as RequestRedirect });
+    const loc = head.headers.get("location");
+    if (loc) {
+      const r2 = await doFetch(loc, {
+        redirect: "follow",
+        headers: { "User-Agent": "Mozilla/5.0" },
+      });
+      if (r2.ok) return await r2.text();
+    }
+  } catch (_) {}
+
+  // 3) GET manuel pour choper la Location
+  const r3 = await doFetch(url, { redirect: "manual" as RequestRedirect });
+  const loc2 = r3.headers.get("location");
+  if (loc2) {
+    const r4 = await doFetch(loc2, {
+      redirect: "follow",
+      headers: { "User-Agent": "Mozilla/5.0" },
+    });
+    if (r4.ok) return await r4.text();
+  }
+
+  throw new Error("fetch_failed");
+}
+
 export function parseDateFlexible(v: unknown): string | null {
   if (!v) return null;
   const s = String(v).trim();
@@ -66,9 +101,7 @@ export async function syncCsvUrl(userId: string, url: string, fetchFn?: FetchFn)
   const sb = createClient();
   const doFetch = fetchFn ?? fetch;
 
-  const res = await doFetch(url);
-  if (!res.ok) throw new Error(`Failed to fetch CSV: ${res.status} ${res.statusText}`);
-  const text = await res.text();
+  const text = await fetchCsvText(doFetch, url); // <-- PATCH ICI
 
   let out = parseWith(text);
   if (out.errors?.length && out.data.length === 0) {
@@ -122,7 +155,6 @@ export async function syncCsvUrl(userId: string, url: string, fetchFn?: FetchFn)
       } else {
         const cur = existing![0];
         const patch: Record<string, unknown> = {
-          // priorité aux nouvelles infos si fournies
           email: email ?? cur.email ?? null,
           phone_e164: phoneObj?.e164 ?? cur.phone_e164 ?? null,
           phone_cc:   phoneObj?.cc   ?? cur.phone_cc   ?? null,
@@ -137,7 +169,6 @@ export async function syncCsvUrl(userId: string, url: string, fetchFn?: FetchFn)
         if (upErr) throw upErr;
       }
 
-      // --- Achats & reminders ---
       const order_id = (r.order_id ?? (r as any).commande ?? (r as any).order)?.toString().trim();
       const order_date = parseDateFlexible(r.order_date ?? (r as any).date ?? (r as any).purchased_at);
 
@@ -167,7 +198,6 @@ export async function syncCsvUrl(userId: string, url: string, fetchFn?: FetchFn)
 
         if (!error && purchase?.id) {
           purchasesUpserted++;
-          // RPC côté DB qui planifie J+1/J+7/J+30
           const { data: planned } = await sb.rpc("plan_reminders_for_purchase", {
             p_user_id: userId,
             p_purchase_id: purchase.id,
@@ -178,8 +208,6 @@ export async function syncCsvUrl(userId: string, url: string, fetchFn?: FetchFn)
       }
     } catch (e) {
       console.error("syncCsvUrl row error:", e);
-      // on compte comme "invalid" uniquement les erreurs techniques de la ligne
-      // (le continue ci-dessus gère les lignes vides/skip)
     }
   }
 
