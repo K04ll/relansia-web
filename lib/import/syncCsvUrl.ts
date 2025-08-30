@@ -1,8 +1,7 @@
-// lib/import/syncCsvUrl.ts
 /* eslint-disable no-console */
 import Papa from "papaparse";
 import { createClient } from "@/lib/supabaseAdmin";
-import { normalizeEmail, normalizePhone, phoneDedupKey } from '@/lib/import/helpers';
+import { normalizeEmail, normalizePhone, phoneDedupKey } from "@/lib/import/helpers";
 
 const ALIASES: Record<string, string> = {
   "email": "email", "email address": "email", "e-mail": "email", "courriel": "email",
@@ -34,39 +33,31 @@ function parseWith(text: string, delimiter?: string) {
 
 export type FetchFn = (input: string, init?: RequestInit) => Promise<Response>;
 
-/** Suivi robuste des CSV Google Drive (303 -> drive.usercontent) */
+/**
+ * Fetch CSV text with retries, redirects and UA
+ */
 async function fetchCsvText(doFetch: FetchFn, url: string): Promise<string> {
-  // 1) Essai standard (follow)
   try {
     const r = await doFetch(url, { redirect: "follow" });
     if (r.ok) return await r.text();
-  } catch (_) {}
+    console.error("Fetch failed, status:", r.status, r.statusText);
+  } catch (e) {
+    console.error("Direct fetch error:", e);
+  }
 
-  // 2) HEAD puis GET sur Location (cas 303 Drive)
+  // Retry with User-Agent
   try {
-    const head = await doFetch(url, { method: "HEAD", redirect: "manual" as RequestRedirect });
-    const loc = head.headers.get("location");
-    if (loc) {
-      const r2 = await doFetch(loc, {
-        redirect: "follow",
-        headers: { "User-Agent": "Mozilla/5.0" },
-      });
-      if (r2.ok) return await r2.text();
-    }
-  } catch (_) {}
-
-  // 3) GET manuel pour choper la Location
-  const r3 = await doFetch(url, { redirect: "manual" as RequestRedirect });
-  const loc2 = r3.headers.get("location");
-  if (loc2) {
-    const r4 = await doFetch(loc2, {
+    const r2 = await doFetch(url, {
       redirect: "follow",
       headers: { "User-Agent": "Mozilla/5.0" },
     });
-    if (r4.ok) return await r4.text();
+    if (r2.ok) return await r2.text();
+    console.error("Retry fetch failed, status:", r2.status, r2.statusText);
+  } catch (e) {
+    console.error("Retry fetch error:", e);
   }
 
-  throw new Error("fetch_failed");
+  throw new Error(`fetch_failed for ${url}`);
 }
 
 export function parseDateFlexible(v: unknown): string | null {
@@ -79,10 +70,10 @@ export function parseDateFlexible(v: unknown): string | null {
   if (m) {
     const d1 = Number(m[1]), d2 = Number(m[2]), y = Number(m[3]);
     const hh = Number(m[4] ?? 0), mm = Number(m[5] ?? 0), ss = Number(m[6] ?? 0);
-    const asFR = new Date(Date.UTC(y, d2 - 1, d1, hh, mm, ss)); // dd/mm
+    const asFR = new Date(Date.UTC(y, d2 - 1, d1, hh, mm, ss));
     if (d1 > 12) return isNaN(asFR.getTime()) ? null : asFR.toISOString();
     if (!isNaN(asFR.getTime())) return asFR.toISOString();
-    const asUS = new Date(Date.UTC(y, d1 - 1, d2, hh, mm, ss)); // mm/dd
+    const asUS = new Date(Date.UTC(y, d1 - 1, d2, hh, mm, ss));
     return isNaN(asUS.getTime()) ? null : asUS.toISOString();
   }
 
@@ -101,7 +92,7 @@ export async function syncCsvUrl(userId: string, url: string, fetchFn?: FetchFn)
   const sb = createClient();
   const doFetch = fetchFn ?? fetch;
 
-  const text = await fetchCsvText(doFetch, url); // <-- PATCH ICI
+  const text = await fetchCsvText(doFetch, url);
 
   let out = parseWith(text);
   if (out.errors?.length && out.data.length === 0) {
@@ -169,6 +160,7 @@ export async function syncCsvUrl(userId: string, url: string, fetchFn?: FetchFn)
         if (upErr) throw upErr;
       }
 
+      // --- Achats & reminders ---
       const order_id = (r.order_id ?? (r as any).commande ?? (r as any).order)?.toString().trim();
       const order_date = parseDateFlexible(r.order_date ?? (r as any).date ?? (r as any).purchased_at);
 
