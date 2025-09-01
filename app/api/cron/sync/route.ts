@@ -49,30 +49,29 @@ export async function POST(req: NextRequest) {
     }> = [];
 
     for (const s of sources ?? []) {
-      try {
-        const res = await syncCsvUrl({
-          url: String(s.url),
-          userId: String(s.user_id),
-          mapping: (s as any).mapping ?? undefined,
-        });
-        totalRows += res.count ?? 0;
-        customersUpserted += res.customersUpserted ?? 0;
-        purchasesUpserted += res.purchasesUpserted ?? 0;
-        remindersCreated += res.remindersCreated ?? 0;
+  try {
+    // ✅ Certains typings attendent 2–3 args (userId, url, fetchFn?)
+    const res = await syncCsvUrl(String(s.user_id), String(s.url));
 
-        results.push({
-          id: (s as any).id,
-          ok: true,
-          count: res.count ?? 0,
-          customersUpserted: res.customersUpserted ?? 0,
-          purchasesUpserted: res.purchasesUpserted ?? 0,
-          remindersCreated: res.remindersCreated ?? 0,
-        });
-      } catch (e: any) {
-        console.error("syncCsvUrl error for source", (s as any).id, e?.message || e);
-        results.push({ id: (s as any).id, ok: false, error: e?.message || "unknown_error" });
-      }
-    }
+    totalRows += res.count ?? 0;
+    customersUpserted += res.customersUpserted ?? 0;
+    purchasesUpserted += res.purchasesUpserted ?? 0;
+    remindersCreated += res.remindersCreated ?? 0;
+
+    results.push({
+      id: (s as any).id,
+      ok: true,
+      count: res.count ?? 0,
+      customersUpserted: res.customersUpserted ?? 0,
+      purchasesUpserted: res.purchasesUpserted ?? 0,
+      remindersCreated: res.remindersCreated ?? 0,
+    });
+  } catch (e: any) {
+    console.error("syncCsvUrl error for source", (s as any).id, e?.message || e);
+    results.push({ id: (s as any).id, ok: false, error: e?.message || "unknown_error" });
+  }
+}
+
 
     return NextResponse.json({
       ok: true,
