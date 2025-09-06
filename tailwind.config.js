@@ -7,7 +7,7 @@ module.exports = {
     "./emails/**/*.{js,ts,jsx,tsx}",
     "./lib/**/*.{js,ts,jsx,tsx}",
   ],
-  darkMode: "class", // on pilote le dark via la classe .dark sur <html>
+  darkMode: "class",
   theme: {
     extend: {
       colors: {
@@ -20,6 +20,11 @@ module.exports = {
         ring: "var(--ring)",
         "text-dim": "var(--text-dim)",
       },
+      // ✅ Ajoute les polices DANS extend
+      fontFamily: {
+  sans: ["var(--font-sans)", "ui-sans-serif", "system-ui", "sans-serif"],
+  hr: ["var(--font-hr)", "ui-sans-serif", "system-ui", "sans-serif"],
+},
     },
   },
   plugins: [],

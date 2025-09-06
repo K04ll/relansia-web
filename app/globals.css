@@ -1,5 +1,112 @@
-/* app/globals.css */
+/* app/globals.css
+   - Conserve tes styles existants
+   - Tailwind chargé via @import (comme avant)
+   - Body en Inter (font-sans)
+   - H1/H2/H3 en Space Grotesk (font-hr) via @layer base pour ne rien casser
+*/
+
 @import "tailwindcss";
 
-/* (optionnel) styles globaux à toi ici */
-html { scroll-behavior: smooth; }
+/* ---------- Base (via @layer pour respecter l’ordre Tailwind) ---------- */
+@layer base {
+  html {
+    scroll-behavior: smooth;
+    color-scheme: light dark;
+  }
+
+  /* Corps de texte = Inter (via --font-sans) */
+  body {
+    @apply font-sans;
+    background: var(--background);
+    color: var(--foreground);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    min-height: 100vh;
+  }
+
+  /* Titres = Space Grotesk (via --font-hr) */
+ h1, h2, h3, h4, h5, h6,
+.font-hr {
+  font-family: var(--font-hr), -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+}
+
+  ::selection { background: color(display-p3 0.43 0.35 0.81 / 0.28); }
+  :focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * {
+      animation: none !important;
+      transition: none !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
+  /* Scrollbar (FF + WebKit) */
+  * { scrollbar-width: thin; scrollbar-color: rgba(0,0,0,0.18) transparent; }
+  *::-webkit-scrollbar { width: 10px; height: 10px; }
+  *::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.18); border-radius: 999px; }
+  .dark *::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.18); }
+}
+
+/* ---------- Utilities compat (tokens) ---------- */
+.bg-surface { background: var(--surface); }
+.text-dim { color: var(--text-dim); }
+.border-token { border-color: var(--border); }
+.shadow-token { box-shadow: var(--shadow-sm); }
+.shadow-token-lg { box-shadow: var(--shadow-md); }
+.radius { border-radius: var(--radius); }
+.radius-lg { border-radius: var(--radius-lg, 16px); }
+
+/* ---------- Hero (fond + fondu bas) ---------- */
+.hero-sheen {
+  position: relative;
+  background:
+    radial-gradient(1200px 600px at 70% 35%, rgba(110,86,207,0.13), transparent 76%),
+    radial-gradient(900px 480px at 30% 20%, rgba(110,86,207,0.07), transparent 72%),
+    var(--background);
+  overflow: hidden;
+}
+.dark .hero-sheen {
+  background:
+    radial-gradient(1200px 600px at 70% 35%, rgba(138,132,255,0.22), transparent 76%),
+    radial-gradient(900px 480px at 30% 20%, rgba(138,132,255,0.12), transparent 72%),
+    var(--background);
+}
+.hero-sheen::after{
+  content:"";
+  position:absolute; left:0; right:0; bottom:0;
+  height:220px; /* prolonge bien le fondu */
+  background: linear-gradient(to bottom, transparent 0%, var(--background) 85%);
+  pointer-events:none;
+}
+
+/* ---------- Boutons ---------- */
+.btn{
+  display:inline-flex; align-items:center; justify-content:center;
+  border-radius:var(--radius);
+  padding:0.625rem 1rem;
+  font-weight:600; font-size:var(--fs-sm,14px);
+  transition:
+    background-color var(--dur-fast,180ms) var(--ease-standard,cubic-bezier(.2,.8,.2,1)),
+    transform var(--dur-quick,120ms) var(--ease-standard,cubic-bezier(.2,.8,.2,1));
+}
+.btn:active{ transform:translateY(0.5px); }
+.btn-primary{ background-color:var(--primary); color:var(--primary-contrast,#fff); }
+.btn-primary:hover{ background-color:var(--primary-hover); }
+.btn-ghost{ border:1px solid var(--border); color:var(--foreground); background-color:transparent; }
+.btn-ghost:hover{ background-color:rgba(0,0,0,0.04); }
+.dark .btn-ghost:hover{ background-color:rgba(255,255,255,0.06); }
+
+/* ---------- Cartes ---------- */
+.card{
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:var(--radius-lg,16px);
+  box-shadow:var(--shadow-sm);
+}
+
+/* ---------- Typo utils (optionnels) ---------- */
+.h1{ font-size:clamp(2rem,3vw,2.5rem); font-weight:700; letter-spacing:-0.02em; }
+.h2{ font-size:clamp(1.5rem,2.2vw,2rem); font-weight:600; }
+.subtle{ color:var(--text-dim); }
